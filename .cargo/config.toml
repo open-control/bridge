@@ -1,0 +1,7 @@
+# Use GNU toolchain on Windows (works with MSYS2/MinGW)
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+
+# Default to GNU target on this machine
+[build]
+target = "x86_64-pc-windows-gnu"

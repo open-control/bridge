@@ -1,0 +1,114 @@
+//! Traffic statistics for the bridge
+//!
+//! Thread-safe counters for measuring bytes/sec throughput.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::Instant;
+
+/// Traffic statistics with rate calculation
+pub struct Stats {
+    /// Total bytes transmitted (to serial)
+    tx_total: AtomicU64,
+    /// Total bytes received (from serial)
+    rx_total: AtomicU64,
+    /// Snapshot of tx_total at last rate calculation
+    tx_snapshot: AtomicU64,
+    /// Snapshot of rx_total at last rate calculation
+    rx_snapshot: AtomicU64,
+    /// Time of last rate calculation
+    last_calc: Mutex<Instant>,
+    /// Cached TX rate in bytes/sec
+    tx_rate: AtomicU64,
+    /// Cached RX rate in bytes/sec
+    rx_rate: AtomicU64,
+}
+
+impl Stats {
+    pub fn new() -> Self {
+        Self {
+            tx_total: AtomicU64::new(0),
+            rx_total: AtomicU64::new(0),
+            tx_snapshot: AtomicU64::new(0),
+            rx_snapshot: AtomicU64::new(0),
+            last_calc: Mutex::new(Instant::now()),
+            tx_rate: AtomicU64::new(0),
+            rx_rate: AtomicU64::new(0),
+        }
+    }
+
+    /// Add transmitted bytes (Host -> Controller)
+    #[inline]
+    pub fn add_tx(&self, bytes: usize) {
+        self.tx_total.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Add received bytes (Controller -> Host)
+    #[inline]
+    pub fn add_rx(&self, bytes: usize) {
+        self.rx_total.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Get total transmitted bytes
+    pub fn tx_total(&self) -> u64 {
+        self.tx_total.load(Ordering::Relaxed)
+    }
+
+    /// Get total received bytes
+    pub fn rx_total(&self) -> u64 {
+        self.rx_total.load(Ordering::Relaxed)
+    }
+
+    /// Update rate calculations and return (tx_kb_s, rx_kb_s)
+    /// Call this periodically (e.g., every 500ms) from the UI thread
+    pub fn update_rates(&self) -> (f64, f64) {
+        let now = Instant::now();
+        let mut last = self.last_calc.lock().unwrap();
+        let elapsed = now.duration_since(*last).as_secs_f64();
+
+        if elapsed < 0.1 {
+            // Too soon, return cached values
+            let tx = f64::from_bits(self.tx_rate.load(Ordering::Relaxed));
+            let rx = f64::from_bits(self.rx_rate.load(Ordering::Relaxed));
+            return (tx, rx);
+        }
+
+        let tx_now = self.tx_total.load(Ordering::Relaxed);
+        let rx_now = self.rx_total.load(Ordering::Relaxed);
+        let tx_prev = self.tx_snapshot.swap(tx_now, Ordering::Relaxed);
+        let rx_prev = self.rx_snapshot.swap(rx_now, Ordering::Relaxed);
+
+        let tx_rate = (tx_now - tx_prev) as f64 / elapsed / 1024.0; // KB/s
+        let rx_rate = (rx_now - rx_prev) as f64 / elapsed / 1024.0; // KB/s
+
+        self.tx_rate.store(tx_rate.to_bits(), Ordering::Relaxed);
+        self.rx_rate.store(rx_rate.to_bits(), Ordering::Relaxed);
+        *last = now;
+
+        (tx_rate, rx_rate)
+    }
+
+    /// Get cached rates without updating (tx_kb_s, rx_kb_s)
+    pub fn rates(&self) -> (f64, f64) {
+        let tx = f64::from_bits(self.tx_rate.load(Ordering::Relaxed));
+        let rx = f64::from_bits(self.rx_rate.load(Ordering::Relaxed));
+        (tx, rx)
+    }
+
+    /// Reset all counters
+    pub fn reset(&self) {
+        self.tx_total.store(0, Ordering::Relaxed);
+        self.rx_total.store(0, Ordering::Relaxed);
+        self.tx_snapshot.store(0, Ordering::Relaxed);
+        self.rx_snapshot.store(0, Ordering::Relaxed);
+        self.tx_rate.store(0, Ordering::Relaxed);
+        self.rx_rate.store(0, Ordering::Relaxed);
+        *self.last_calc.lock().unwrap() = Instant::now();
+    }
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
