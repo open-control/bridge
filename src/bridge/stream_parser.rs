@@ -102,30 +102,59 @@ impl StreamParser {
     }
 }
 
+/// Strip ANSI escape codes from a string
+///
+/// OC_LOG uses ANSI color codes for terminal output, but we need to parse
+/// the plain text for log level detection.
+fn strip_ansi_codes(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip ESC and everything until 'm' (end of ANSI sequence)
+            while let Some(&next) = chars.peek() {
+                chars.next();
+                if next == 'm' {
+                    break;
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 /// Parse an OC_LOG formatted message
 ///
 /// Pattern: `[XXXms] LEVEL: message`
 /// Example: `[1234ms] INFO: Boot completed`
 ///
+/// Handles ANSI color codes that OC_LOG adds for terminal output.
+///
 /// Returns (Some(level), message) if pattern matches, (None, original) otherwise
 fn parse_oc_log(text: &str) -> (Option<LogLevel>, String) {
+    // Strip ANSI color codes first (OC_LOG adds colors for terminal output)
+    let clean_text = strip_ansi_codes(text);
+
     // Quick check: must start with '['
-    if !text.starts_with('[') {
-        return (None, text.to_string());
+    if !clean_text.starts_with('[') {
+        return (None, clean_text);
     }
 
     // Find the closing bracket
-    let Some(bracket_end) = text.find(']') else {
-        return (None, text.to_string());
+    let Some(bracket_end) = clean_text.find(']') else {
+        return (None, clean_text);
     };
 
     // Check for "ms]" pattern
-    if !text[..=bracket_end].ends_with("ms]") {
-        return (None, text.to_string());
+    if !clean_text[..=bracket_end].ends_with("ms]") {
+        return (None, clean_text);
     }
 
     // Extract the part after "] "
-    let rest = text[bracket_end + 1..].trim_start();
+    let rest = clean_text[bracket_end + 1..].trim_start();
 
     // Parse level
     let (level, message) = if let Some(msg) = rest.strip_prefix("DEBUG: ") {
@@ -138,7 +167,7 @@ fn parse_oc_log(text: &str) -> (Option<LogLevel>, String) {
         (Some(LogLevel::Error), msg.to_string())
     } else {
         // Has timestamp but no recognized level
-        return (None, text.to_string());
+        return (None, clean_text);
     };
 
     (level, message)
@@ -188,6 +217,22 @@ mod tests {
         let (level, msg) = parse_oc_log("[other] Some text");
         assert_eq!(level, None);
         assert_eq!(msg, "[other] Some text");
+    }
+
+    #[test]
+    fn test_parse_oc_log_with_ansi_codes() {
+        // Real OC_LOG output with ANSI color codes
+        let input = "\x1b[2m[1234ms] \x1b[0m\x1b[32mINFO: \x1b[0mBoot completed";
+        let (level, msg) = parse_oc_log(input);
+        assert_eq!(level, Some(LogLevel::Info));
+        assert_eq!(msg, "Boot completed");
+    }
+
+    #[test]
+    fn test_strip_ansi_codes() {
+        let input = "\x1b[2m[1234ms] \x1b[0m\x1b[32mINFO: \x1b[0mTest";
+        let clean = strip_ansi_codes(input);
+        assert_eq!(clean, "[1234ms] INFO: Test");
     }
 
     #[test]
