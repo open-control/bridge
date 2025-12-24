@@ -74,65 +74,6 @@ pub fn is_elevated() -> bool {
     }
 }
 
-/// Restart the current process with elevated privileges (UAC prompt)
-#[cfg(windows)]
-pub fn restart_elevated() -> Result<()> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use std::ptr;
-
-    #[link(name = "shell32")]
-    extern "system" {
-        fn ShellExecuteW(
-            hwnd: *mut std::ffi::c_void,
-            lpOperation: *const u16,
-            lpFile: *const u16,
-            lpParameters: *const u16,
-            lpDirectory: *const u16,
-            nShowCmd: i32,
-        ) -> isize;
-    }
-
-    fn to_wide(s: &str) -> Vec<u16> {
-        OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
-
-    let exe = std::env::current_exe()?;
-    let exe_wide = to_wide(&exe.to_string_lossy());
-    let verb = to_wide("runas");
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let args_str = args.join(" ");
-    let args_wide = to_wide(&args_str);
-
-    const SW_SHOWNORMAL: i32 = 1;
-
-    let result = unsafe {
-        ShellExecuteW(
-            ptr::null_mut(),
-            verb.as_ptr(),
-            exe_wide.as_ptr(),
-            args_wide.as_ptr(),
-            ptr::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-
-    if result > 32 {
-        // Success - exit current process
-        std::process::exit(0);
-    } else {
-        anyhow::bail!("Failed to restart with elevation (error code: {})", result);
-    }
-}
-
-#[cfg(not(windows))]
-pub fn restart_elevated() -> Result<()> {
-    anyhow::bail!("Elevation not supported on this platform. Run with sudo.")
-}
-
 /// Check if elevation is required for a specific operation
 pub fn requires_elevation(operation: &str) -> bool {
     match operation {
@@ -174,7 +115,7 @@ pub fn run_elevated_action(action: &str) -> Result<()> {
     let verb = to_wide("runas");
     let args_wide = to_wide(action);
 
-    const SW_SHOWNORMAL: i32 = 1;
+    const SW_HIDE: i32 = 0;
 
     let result = unsafe {
         ShellExecuteW(
@@ -183,7 +124,7 @@ pub fn run_elevated_action(action: &str) -> Result<()> {
             exe_wide.as_ptr(),
             args_wide.as_ptr(),
             ptr::null(),
-            SW_SHOWNORMAL,
+            SW_HIDE,
         )
     };
 

@@ -9,7 +9,10 @@ mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+use anyhow::anyhow;
 
 /// Run as a Windows service (called from main when --service flag is set)
 #[cfg(target_os = "windows")]
@@ -118,24 +121,6 @@ pub fn stop() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         linux::stop()
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        Err(anyhow!("Service not supported on this platform"))
-    }
-}
-
-/// Restart the service
-pub fn restart() -> Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        windows::restart()
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        linux::restart()
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]

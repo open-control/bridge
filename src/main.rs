@@ -9,6 +9,7 @@
 
 mod app;
 mod bridge;
+mod config;
 mod elevation;
 mod serial;
 mod service;
@@ -127,68 +128,25 @@ async fn run_headless(port: Option<String>, udp_port: u16) -> Result<()> {
 
 #[cfg(windows)]
 fn run_install_service(args: &[String]) -> Result<()> {
-    use std::io::Write;
-
     let port = parse_arg(args, "--port");
     let udp_port = parse_arg(args, "--udp-port")
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_UDP_PORT);
 
-    println!("Installing OC Bridge service...");
+    // Install service (runs hidden, no user interaction)
+    service::install(port.as_deref(), udp_port)?;
 
-    match service::install(port.as_deref(), udp_port) {
-        Ok(_) => {
-            println!("Service installed successfully.");
+    // Configure ACL to allow current user to control the service
+    let _ = service::configure_user_permissions();
 
-            // Configure ACL to allow current user to control the service
-            if let Err(e) = service::configure_user_permissions() {
-                eprintln!("Warning: Could not set user permissions: {}", e);
-                eprintln!("You may need admin rights to stop/start the service.");
-            } else {
-                println!("User permissions configured (no admin required for stop/start).");
-            }
+    // Wait briefly for service to start
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
-            // Wait for service to start
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if service::is_running().unwrap_or(false) {
-                println!("Service is running.");
-            }
-
-            println!("\nPress Enter to close...");
-            let _ = std::io::stdout().flush();
-            let _ = std::io::stdin().read_line(&mut String::new());
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("Installation failed: {}", e);
-            println!("\nPress Enter to close...");
-            let _ = std::io::stdout().flush();
-            let _ = std::io::stdin().read_line(&mut String::new());
-            Err(e)
-        }
-    }
+    Ok(())
 }
 
 #[cfg(windows)]
 fn run_uninstall_service() -> Result<()> {
-    use std::io::Write;
-
-    println!("Uninstalling OC Bridge service...");
-
-    match service::uninstall() {
-        Ok(_) => {
-            println!("Service uninstalled successfully.");
-            println!("\nPress Enter to close...");
-            let _ = std::io::stdout().flush();
-            let _ = std::io::stdin().read_line(&mut String::new());
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("Uninstallation failed: {}", e);
-            println!("\nPress Enter to close...");
-            let _ = std::io::stdout().flush();
-            let _ = std::io::stdin().read_line(&mut String::new());
-            Err(e)
-        }
-    }
+    // Uninstall service (runs hidden, no user interaction)
+    service::uninstall()
 }

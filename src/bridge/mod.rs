@@ -32,7 +32,6 @@ pub struct Handle {
     shutdown: Arc<AtomicBool>,
     state: Arc<std::sync::RwLock<State>>,
     stats: Arc<Stats>,
-    config: Config,
 }
 
 impl Handle {
@@ -50,19 +49,9 @@ impl Handle {
         *self.state.read().unwrap()
     }
 
-    /// Check if running
-    pub fn is_running(&self) -> bool {
-        matches!(self.state(), State::Running | State::Starting)
-    }
-
     /// Get traffic statistics
     pub fn stats(&self) -> &Arc<Stats> {
         &self.stats
-    }
-
-    /// Get configuration
-    pub fn config(&self) -> &Config {
-        &self.config
     }
 }
 
@@ -156,18 +145,6 @@ impl LogEntry {
             },
         }
     }
-
-    // Legacy compatibility methods (used by existing code)
-
-    /// Legacy: Create incoming message log (deprecated, use protocol_in)
-    pub fn incoming(message: impl Into<String>, size: usize) -> Self {
-        Self::protocol_in(message, size)
-    }
-
-    /// Legacy: Create outgoing message log (deprecated, use protocol_out)
-    pub fn outgoing(message: impl Into<String>, size: usize) -> Self {
-        Self::protocol_out(message, size)
-    }
 }
 
 /// Start the bridge in background, returning a handle and log receiver
@@ -217,7 +194,6 @@ pub fn start(config: Config) -> Result<(Handle, mpsc::Receiver<LogEntry>)> {
         shutdown,
         state,
         stats,
-        config,
     };
 
     Ok((handle, log_rx))

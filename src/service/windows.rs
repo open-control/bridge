@@ -121,13 +121,6 @@ pub fn stop() -> Result<()> {
     Ok(())
 }
 
-/// Restart the service
-pub fn restart() -> Result<()> {
-    stop()?;
-    std::thread::sleep(Duration::from_secs(1));
-    start()
-}
-
 // ============================================================================
 // Service runtime (called when running as a service)
 // ============================================================================

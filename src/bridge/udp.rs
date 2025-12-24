@@ -1,18 +1,21 @@
 //! UDP bridge for Bitwig connection
 //!
-//! Low-latency bridge: UDP datagrams <-> COBS-framed serial.
+//! Zero-allocation bridge: UDP datagrams <-> COBS-framed serial.
 //! Resilient: auto-reconnects when Teensy is disconnected/reconnected.
 //!
-//! Distinguishes between:
-//! - Protocol messages (COBS-encoded, 0x00 delimiter)
-//! - Debug logs (ASCII text, '\n' delimiter)
+//! Optimizations:
+//! - COBS encode/decode with reusable buffers (zero allocation)
+//! - StreamParser callback pattern (zero allocation for protocol messages)
+//! - Bytes crate for zero-copy broadcast channel
+//! - std::sync::mpsc with recv_timeout for writer thread
 
 use super::protocol::parse_message_name;
 use super::stats::Stats;
-use super::stream_parser::{ParsedFrame, StreamParser};
+use super::stream_parser::{ParsedFrameRef, StreamParser};
 use super::LogEntry;
 use crate::serial::{self, cobs};
 use anyhow::Result;
+use bytes::{Bytes, BytesMut};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
@@ -99,13 +102,6 @@ fn create_reusable_udp_socket(port: u16) -> Result<Arc<UdpSocket>> {
     anyhow::bail!("Failed to bind UDP socket after retries")
 }
 
-/// Run the UDP bridge (legacy entry point for headless mode)
-pub async fn run(config: &Config) -> Result<()> {
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let stats = Arc::new(Stats::new());
-    run_with_shutdown(config, shutdown, stats).await
-}
-
 /// Run the UDP bridge with external shutdown signal and stats
 /// This version is resilient: it reconnects automatically when the Teensy disconnects
 pub async fn run_with_shutdown(
@@ -187,10 +183,14 @@ async fn run_bridge_session(
     let session_shutdown = Arc::new(AtomicBool::new(false));
 
     let client_addr: Arc<RwLock<Option<SocketAddr>>> = Arc::new(RwLock::new(None));
-    let (serial_tx, _) = broadcast::channel::<Vec<u8>>(64);
-    let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>(8);
 
-    // Serial reader thread - uses StreamParser to distinguish protocol from debug logs
+    // Broadcast channel uses Bytes for zero-copy cloning
+    let (serial_tx, _) = broadcast::channel::<Bytes>(64);
+
+    // Writer channel uses std::sync::mpsc for blocking recv_timeout
+    let (write_tx, write_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+
+    // Serial reader thread - uses StreamParser callback for zero allocation
     let serial_tx_clone = serial_tx.clone();
     let shutdown_reader = shutdown.clone();
     let session_shutdown_reader = session_shutdown.clone();
@@ -202,6 +202,9 @@ async fn run_bridge_session(
         let mut buf = [0u8; 4096];
         let mut consecutive_errors = 0u32;
 
+        // BytesMut for true zero-copy: decode -> freeze -> broadcast
+        let mut decode_buf = BytesMut::with_capacity(4096);
+
         while !shutdown_reader.load(Ordering::Relaxed)
             && !session_shutdown_reader.load(Ordering::Relaxed)
         {
@@ -209,34 +212,36 @@ async fn run_bridge_session(
                 Ok(n) if n > 0 => {
                     consecutive_errors = 0;
 
-                    // Parse incoming data using StreamParser
-                    for frame in parser.feed(&buf[..n]) {
+                    // Parse incoming data using callback pattern (zero allocation)
+                    parser.feed_callback(&buf[..n], |frame| {
                         match frame {
-                            ParsedFrame::ProtocolMessage { payload } => {
-                                // Decode COBS frame
-                                if let Ok(decoded) = cobs::decode(&payload) {
-                                    stats_reader.add_rx(decoded.len());
+                            ParsedFrameRef::ProtocolMessage { payload } => {
+                                // Decode COBS into BytesMut
+                                decode_buf.clear();
+                                decode_buf.reserve(payload.len());
+                                if cobs::decode_into_bytes(payload, &mut decode_buf).is_ok() {
+                                    stats_reader.add_rx(decode_buf.len());
 
                                     // Extract message name for logging
                                     if let Some(ref tx) = log_tx_reader {
-                                        let msg_name = parse_message_name(&decoded)
-                                            .unwrap_or_else(|| "Unknown".to_string());
-                                        let _ =
-                                            tx.try_send(LogEntry::protocol_in(&msg_name, decoded.len()));
+                                        if let Some(msg_name) = parse_message_name(&decode_buf) {
+                                            let _ = tx.try_send(LogEntry::protocol_in(&msg_name, decode_buf.len()));
+                                        }
                                     }
 
-                                    // Forward to UDP
-                                    let _ = serial_tx_clone.send(decoded);
+                                    // Zero-copy: split off and freeze (no allocation)
+                                    let bytes = decode_buf.split().freeze();
+                                    let _ = serial_tx_clone.send(bytes);
                                 }
                             }
-                            ParsedFrame::DebugLog { level, message } => {
+                            ParsedFrameRef::DebugLog { level, message } => {
                                 // Send debug log entry
                                 if let Some(ref tx) = log_tx_reader {
                                     let _ = tx.try_send(LogEntry::debug_log(level, message));
                                 }
                             }
                         }
-                    }
+                    });
                 }
                 Ok(_) => {
                     // Zero bytes read - could be normal or port gone
@@ -260,11 +265,10 @@ async fn run_bridge_session(
         }
     });
 
-    // Serial writer thread (high priority)
+    // Serial writer thread (high priority, blocking recv)
     let shutdown_writer = shutdown.clone();
     let session_shutdown_writer = session_shutdown.clone();
     let stats_writer = stats.clone();
-    let mut write_rx = write_rx;
     let writer_handle = std::thread::spawn(move || {
         set_thread_high_priority();
         let mut port = serial_write;
@@ -276,7 +280,8 @@ async fn run_bridge_session(
                 break;
             }
 
-            match write_rx.try_recv() {
+            // Blocking recv with timeout (no spinning)
+            match write_rx.recv_timeout(Duration::from_millis(10)) {
                 Ok(data) => {
                     stats_writer.add_tx(data.len());
                     if port.write_all(&data).is_err() {
@@ -285,10 +290,10 @@ async fn run_bridge_session(
                         break;
                     }
                 }
-                Err(mpsc::error::TryRecvError::Empty) => {
-                    std::thread::sleep(Duration::from_millis(1));
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Normal timeout, continue checking shutdown
                 }
-                Err(mpsc::error::TryRecvError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
     });
@@ -299,8 +304,13 @@ async fn run_bridge_session(
     let shutdown_rx = shutdown.clone();
     let session_shutdown_rx = session_shutdown.clone();
     let log_tx_udp = log_tx.clone();
+    let write_tx_clone = write_tx.clone();
     let udp_rx_handle = tokio::spawn(async move {
         let mut buf = [0u8; 4096];
+        // Double buffer pattern: swap instead of clone
+        let mut encode_buf_a = Vec::with_capacity(4096);
+        let mut encode_buf_b = Vec::with_capacity(4096);
+        let mut use_a = true;
 
         loop {
             if shutdown_rx.load(Ordering::Relaxed) || session_shutdown_rx.load(Ordering::Relaxed) {
@@ -314,14 +324,19 @@ async fn run_bridge_session(
 
                     // Log outgoing message (Host -> Controller)
                     if let Some(ref tx) = log_tx_udp {
-                        let msg_name = parse_message_name(&buf[..len])
-                            .unwrap_or_else(|| "Unknown".to_string());
-                        let _ = tx.try_send(LogEntry::protocol_out(&msg_name, len));
+                        if let Some(msg_name) = parse_message_name(&buf[..len]) {
+                            let _ = tx.try_send(LogEntry::protocol_out(&msg_name, len));
+                        }
                     }
 
-                    if let Ok(encoded) = cobs::encode(&buf[..len]) {
-                        let _ = write_tx.try_send(encoded);
+                    // Double buffer: encode into one, send it, swap to other
+                    let encode_buf = if use_a { &mut encode_buf_a } else { &mut encode_buf_b };
+                    if cobs::encode_into(&buf[..len], encode_buf).is_ok() {
+                        // Move ownership of the encoded buffer (no clone)
+                        let to_send = std::mem::take(encode_buf);
+                        let _ = write_tx_clone.send(to_send);
                     }
+                    use_a = !use_a;
                 }
                 Ok(Err(_)) => {}
                 Err(_) => {} // Timeout
@@ -348,6 +363,7 @@ async fn run_bridge_session(
         match tokio::time::timeout(Duration::from_millis(100), serial_rx.recv()).await {
             Ok(Ok(payload)) => {
                 if let Some(addr) = *client_addr.read().await {
+                    // Bytes implements AsRef<[u8]>
                     let _ = socket_tx.send_to(&payload, addr).await;
                 }
             }

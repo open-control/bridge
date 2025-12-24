@@ -80,7 +80,6 @@ fn run_receiver(tx: mpsc::Sender<LogEntry>, shutdown: Arc<AtomicBool>) {
 mod tests {
     use super::*;
     use crate::bridge::{LogKind, LogLevel};
-    use std::net::UdpSocket;
 
     #[test]
     fn test_log_entry_deserialization() {

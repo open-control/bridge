@@ -38,8 +38,8 @@ pub async fn run(app: &mut App) -> Result<()> {
         // Draw UI
         terminal.draw(|f| draw(f, app))?;
 
-        // Handle input with timeout
-        if event::poll(std::time::Duration::from_millis(50))? {
+        // Handle input with timeout (16ms = ~60 FPS)
+        if event::poll(std::time::Duration::from_millis(16))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
@@ -93,6 +93,44 @@ pub async fn run(app: &mut App) -> Result<()> {
                     KeyCode::Char('3') => {
                         app.filter_show_all();
                     }
+                    // Copy logs to clipboard
+                    KeyCode::Char('c') | KeyCode::Char('C') => {
+                        app.copy_logs_to_clipboard();
+                    }
+                    // Pause toggle
+                    KeyCode::Char('p') | KeyCode::Char('P') => {
+                        app.toggle_pause();
+                    }
+                    // Export logs
+                    KeyCode::Char('o') | KeyCode::Char('O') => {
+                        app.export_logs();
+                    }
+                    // Open config
+                    KeyCode::Char('f') | KeyCode::Char('F') => {
+                        app.open_config();
+                    }
+                    // Debug level filters (only when in Debug mode)
+                    // Note: D/I/W/E/A only work when filter is "Debug"
+                    KeyCode::Char('d') => {
+                        if app.filter_name() == "Debug" {
+                            app.filter_debug_level(Some(crate::bridge::LogLevel::Debug));
+                        }
+                    }
+                    KeyCode::Char('w') => {
+                        if app.filter_name() == "Debug" {
+                            app.filter_debug_level(Some(crate::bridge::LogLevel::Warn));
+                        }
+                    }
+                    KeyCode::Char('e') => {
+                        if app.filter_name() == "Debug" {
+                            app.filter_debug_level(Some(crate::bridge::LogLevel::Error));
+                        }
+                    }
+                    KeyCode::Char('a') => {
+                        if app.filter_name() == "Debug" {
+                            app.filter_debug_level(None); // All levels
+                        }
+                    }
                     _ => {}
                 },
                 Event::Mouse(mouse) => match mouse.kind {
@@ -127,24 +165,29 @@ pub async fn run(app: &mut App) -> Result<()> {
 
 fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
-        Constraint::Length(7), // Status widget
+        Constraint::Length(5), // Status widget (reduced from 7)
         Constraint::Min(5),    // Log widget
         Constraint::Length(3), // Actions widget
     ])
     .split(frame.area());
 
     let state = app.state();
+    let filter_name = app.filter_name();
 
     // Status widget
     let status = StatusWidget::new(&state);
     frame.render_widget(status, chunks[0]);
 
-    // Log widget - use filtered logs
-    let filtered: std::collections::VecDeque<_> = app.filtered_logs().cloned().collect();
-    let log = LogWidget::new(&filtered, app.scroll_position(), app.auto_scroll());
+    // Log widget
+    let log = LogWidget::new(
+        app.logs(),
+        app.filter(),
+        app.scroll_position(),
+        state.paused,
+    );
     frame.render_widget(log, chunks[1]);
 
     // Actions widget
-    let actions = ActionsWidget::new(&state);
+    let actions = ActionsWidget::new(&state, filter_name);
     frame.render_widget(actions, chunks[2]);
 }

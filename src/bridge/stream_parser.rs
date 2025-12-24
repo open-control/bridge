@@ -1,26 +1,24 @@
 //! Stream parser for distinguishing protocol messages from debug logs
 //!
+//! Zero-allocation callback pattern for protocol messages.
 //! The Teensy sends two types of data on the same serial USB:
 //! - Protocol messages: COBS-encoded frames terminated by 0x00
 //! - Debug logs: ASCII text terminated by '\n' (OC_LOG_* or Serial.print)
-//!
-//! This parser accumulates bytes and emits complete frames of either type.
 
 use crate::bridge::LogLevel;
 
-/// A parsed frame from the serial stream
-#[derive(Debug, Clone)]
-pub enum ParsedFrame {
+/// A parsed frame reference (zero allocation for protocol messages)
+#[derive(Debug)]
+pub enum ParsedFrameRef<'a> {
     /// Debug log from firmware (OC_LOG_* or Serial.print)
+    /// Note: message is owned String due to ANSI code stripping
     DebugLog {
         level: Option<LogLevel>,
         message: String,
     },
     /// Protocol message (COBS-encoded, needs further decoding)
-    ProtocolMessage {
-        /// Raw COBS frame (without the 0x00 delimiter)
-        payload: Vec<u8>,
-    },
+    /// Payload is a reference to parser's internal buffer (zero-copy)
+    ProtocolMessage { payload: &'a [u8] },
 }
 
 /// Parser state for the serial stream
@@ -45,12 +43,14 @@ impl StreamParser {
         }
     }
 
-    /// Feed new data into the parser and extract complete frames
+    /// Feed new data and invoke callback for each complete frame (zero allocation)
     ///
-    /// Returns a vector of parsed frames (may be empty if no complete frames yet)
-    pub fn feed(&mut self, data: &[u8]) -> Vec<ParsedFrame> {
-        let mut frames = Vec::new();
-
+    /// The callback receives references to internal buffers, avoiding allocations
+    /// for protocol messages. Debug logs still allocate due to ANSI stripping.
+    pub fn feed_callback<F>(&mut self, data: &[u8], mut on_frame: F)
+    where
+        F: FnMut(ParsedFrameRef<'_>),
+    {
         for &byte in data {
             self.buffer.push(byte);
 
@@ -60,12 +60,12 @@ impl StreamParser {
                 if self.buffer.len() > 1 {
                     // Remove the 0x00 delimiter
                     self.buffer.pop();
-                    frames.push(ParsedFrame::ProtocolMessage {
-                        payload: std::mem::take(&mut self.buffer),
+                    // Call with reference to buffer (zero-copy)
+                    on_frame(ParsedFrameRef::ProtocolMessage {
+                        payload: &self.buffer,
                     });
-                } else {
-                    self.buffer.clear();
                 }
+                self.buffer.clear();
             } else if byte == b'\n' {
                 // Text line complete (debug log)
                 // Remove the \n
@@ -76,15 +76,12 @@ impl StreamParser {
                 }
 
                 if !self.buffer.is_empty() {
-                    if let Ok(text) = String::from_utf8(std::mem::take(&mut self.buffer)) {
-                        let (level, message) = parse_oc_log(&text);
-                        frames.push(ParsedFrame::DebugLog { level, message });
-                    } else {
-                        self.buffer.clear();
+                    if let Ok(text) = std::str::from_utf8(&self.buffer) {
+                        let (level, message) = parse_oc_log(text);
+                        on_frame(ParsedFrameRef::DebugLog { level, message });
                     }
-                } else {
-                    self.buffer.clear();
                 }
+                self.buffer.clear();
             }
 
             // Prevent buffer overflow
@@ -92,13 +89,6 @@ impl StreamParser {
                 self.buffer.clear();
             }
         }
-
-        frames
-    }
-
-    /// Clear the internal buffer
-    pub fn clear(&mut self) {
-        self.buffer.clear();
     }
 }
 
@@ -238,53 +228,55 @@ mod tests {
     #[test]
     fn test_stream_parser_debug_log() {
         let mut parser = StreamParser::new();
-        let frames = parser.feed(b"[123ms] INFO: Test\n");
+        let mut results = Vec::new();
 
-        assert_eq!(frames.len(), 1);
-        match &frames[0] {
-            ParsedFrame::DebugLog { level, message } => {
-                assert_eq!(*level, Some(LogLevel::Info));
-                assert_eq!(message, "Test");
+        parser.feed_callback(b"[123ms] INFO: Test\n", |frame| {
+            if let ParsedFrameRef::DebugLog { level, message } = frame {
+                results.push((level, message));
             }
-            _ => panic!("Expected DebugLog"),
-        }
+        });
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, Some(LogLevel::Info));
+        assert_eq!(results[0].1, "Test");
     }
 
     #[test]
     fn test_stream_parser_protocol_message() {
         let mut parser = StreamParser::new();
-        // COBS frame: [0x01, 0x02, 0x03] + delimiter 0x00
-        let frames = parser.feed(&[0x01, 0x02, 0x03, 0x00]);
+        let mut payloads: Vec<Vec<u8>> = Vec::new();
 
-        assert_eq!(frames.len(), 1);
-        match &frames[0] {
-            ParsedFrame::ProtocolMessage { payload } => {
-                assert_eq!(payload, &[0x01, 0x02, 0x03]);
+        // COBS frame: [0x01, 0x02, 0x03] + delimiter 0x00
+        parser.feed_callback(&[0x01, 0x02, 0x03, 0x00], |frame| {
+            if let ParsedFrameRef::ProtocolMessage { payload } = frame {
+                payloads.push(payload.to_vec()); // Copy for test assertion
             }
-            _ => panic!("Expected ProtocolMessage"),
-        }
+        });
+
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0], vec![0x01, 0x02, 0x03]);
     }
 
     #[test]
     fn test_stream_parser_mixed() {
         let mut parser = StreamParser::new();
+        let mut frame_count = 0;
 
         // First: partial debug log
-        let frames = parser.feed(b"[100ms] INFO: ");
-        assert!(frames.is_empty());
+        parser.feed_callback(b"[100ms] INFO: ", |_| frame_count += 1);
+        assert_eq!(frame_count, 0);
 
         // Complete the debug log
-        let frames = parser.feed(b"Done\n");
-        assert_eq!(frames.len(), 1);
+        parser.feed_callback(b"Done\n", |_| frame_count += 1);
+        assert_eq!(frame_count, 1);
 
         // Then a protocol message
-        let frames = parser.feed(&[0x0D, b'T', b'e', b's', b't', 0x00]);
-        assert_eq!(frames.len(), 1);
-        match &frames[0] {
-            ParsedFrame::ProtocolMessage { payload } => {
+        parser.feed_callback(&[0x0D, b'T', b'e', b's', b't', 0x00], |frame| {
+            frame_count += 1;
+            if let ParsedFrameRef::ProtocolMessage { payload } = frame {
                 assert_eq!(payload.len(), 5);
             }
-            _ => panic!("Expected ProtocolMessage"),
-        }
+        });
+        assert_eq!(frame_count, 2);
     }
 }

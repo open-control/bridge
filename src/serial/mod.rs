@@ -30,41 +30,6 @@ pub fn detect_teensy() -> Result<String> {
     }
 }
 
-/// List all available serial ports with details
-pub fn list_ports() -> Vec<PortInfo> {
-    serialport::available_ports()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|port| {
-            let (vid, pid, product) = match &port.port_type {
-                SerialPortType::UsbPort(usb) => (
-                    Some(usb.vid),
-                    Some(usb.pid),
-                    usb.product.clone(),
-                ),
-                _ => (None, None, None),
-            };
-            PortInfo {
-                name: port.port_name.clone(),
-                vid,
-                pid,
-                product,
-                is_teensy: is_teensy(&port),
-            }
-        })
-        .collect()
-}
-
-/// Information about a serial port
-#[derive(Debug, Clone)]
-pub struct PortInfo {
-    pub name: String,
-    pub vid: Option<u16>,
-    pub pid: Option<u16>,
-    pub product: Option<String>,
-    pub is_teensy: bool,
-}
-
 /// Open a serial port with the given settings
 pub fn open(port_name: &str, baud_rate: u32) -> Result<Box<dyn serialport::SerialPort>> {
     let port = serialport::new(port_name, baud_rate)

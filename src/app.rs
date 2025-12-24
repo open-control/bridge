@@ -1,18 +1,15 @@
 //! Application state and orchestration
 
 use crate::bridge::{
-    self, log_receiver, stats::Stats, udp::Config, Direction, Handle, LogEntry, LogKind,
-    State as BridgeState,
+    self, log_receiver, stats::Stats, udp::Config as BridgeConfig, Direction, Handle, LogEntry,
+    LogKind, LogLevel, State as BridgeState,
 };
-use crate::{elevation, serial, service};
+use crate::{config, elevation, serial, service};
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
-
-const MAX_LOG_ENTRIES: usize = 200;
-const DEFAULT_UDP_PORT: u16 = 9000;
-const DEFAULT_BAUD_RATE: u32 = 2_000_000;
 
 /// Application mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,9 +25,11 @@ pub enum AppMode {
 pub struct LogFilter {
     pub show_protocol: bool,
     pub show_debug: bool,
+    pub show_system: bool,
     pub show_direction_in: bool,
     pub show_direction_out: bool,
     pub message_types: HashSet<String>, // Empty = all allowed
+    pub debug_level: Option<LogLevel>,  // None = all levels, Some(X) = only X
 }
 
 impl Default for LogFilter {
@@ -38,9 +37,11 @@ impl Default for LogFilter {
         Self {
             show_protocol: true,
             show_debug: true,
+            show_system: true,
             show_direction_in: true,
             show_direction_out: true,
             message_types: HashSet::new(),
+            debug_level: None,
         }
     }
 }
@@ -68,8 +69,18 @@ impl LogFilter {
                 }
                 true
             }
-            LogKind::Debug { .. } => self.show_debug,
-            LogKind::System { .. } => true, // Always show system messages
+            LogKind::Debug { level, .. } => {
+                if !self.show_debug {
+                    return false;
+                }
+                // Check debug level filter
+                match (&self.debug_level, level) {
+                    (None, _) => true,                     // No filter = show all
+                    (Some(filter), Some(lvl)) => filter == lvl, // Match specific level
+                    (Some(_), None) => false,              // Filter set but no level = hide
+                }
+            }
+            LogKind::System { .. } => self.show_system,
         }
     }
 }
@@ -83,12 +94,16 @@ pub struct AppState {
     pub traffic_rates: (f64, f64), // (tx_kb_s, rx_kb_s)
     pub service_installed: bool,
     pub service_running: bool,
-    pub mode: AppMode,
-    pub filter: LogFilter,
+    pub filter_name: String,
+    pub paused: bool,
+    pub status_message: Option<String>,
 }
 
 /// Main application
 pub struct App {
+    // Config
+    config: config::Config,
+
     // Bridge
     bridge_handle: Option<Handle>,
     bridge_log_rx: Option<mpsc::Receiver<LogEntry>>,
@@ -110,14 +125,27 @@ pub struct App {
     scroll: usize,
     auto_scroll: bool,
     filter: LogFilter,
+    paused: bool,
+
+    // UI feedback
+    status_message: Option<(String, Instant)>,
 
     // Control
     should_quit: bool,
+    poll_counter: u32,
 }
 
 impl App {
     pub fn new() -> Self {
-        let serial_port = serial::detect_teensy().ok();
+        // Load config
+        let cfg = config::load();
+
+        let serial_port = if cfg.bridge.serial_port.is_empty() {
+            serial::detect_teensy().ok()
+        } else {
+            Some(cfg.bridge.serial_port.clone())
+        };
+
         let service_installed = service::is_installed().unwrap_or(false);
         let service_running = service::is_running().unwrap_or(false);
 
@@ -128,7 +156,10 @@ impl App {
             AppMode::Local
         };
 
+        let max_entries = cfg.logs.max_entries;
+
         let mut app = Self {
+            config: cfg,
             bridge_handle: None,
             bridge_log_rx: None,
             mode,
@@ -136,15 +167,19 @@ impl App {
             monitor_log_rx: None,
             monitor_stats: Stats::new(),
             serial_port,
-            udp_port: DEFAULT_UDP_PORT,
+            udp_port: 9000, // Will be set from config
             service_installed,
             service_running,
-            logs: VecDeque::with_capacity(MAX_LOG_ENTRIES),
+            logs: VecDeque::with_capacity(max_entries),
             scroll: 0,
             auto_scroll: true,
             filter: LogFilter::default(),
+            paused: false,
+            status_message: None,
             should_quit: false,
+            poll_counter: 0,
         };
+        app.udp_port = app.config.bridge.udp_port;
 
         // Add welcome message
         app.add_log(LogEntry::system("OC Bridge ready"));
@@ -180,6 +215,15 @@ impl App {
                 .unwrap_or((0.0, 0.0))
         };
 
+        // Status message with 2 second timeout
+        let status_message = self.status_message.as_ref().and_then(|(msg, time)| {
+            if time.elapsed().as_secs() < 2 {
+                Some(msg.clone())
+            } else {
+                None
+            }
+        });
+
         AppState {
             bridge_state,
             serial_port: self.serial_port.clone(),
@@ -187,9 +231,15 @@ impl App {
             traffic_rates,
             service_installed: self.service_installed,
             service_running: self.service_running,
-            mode: self.mode,
-            filter: self.filter.clone(),
+            filter_name: self.filter_name().to_string(),
+            paused: self.paused,
+            status_message,
         }
+    }
+
+    /// Set a temporary status message
+    fn set_status(&mut self, message: impl Into<String>) {
+        self.status_message = Some((message.into(), Instant::now()));
     }
 
     /// Poll for updates (call from UI loop)
@@ -237,15 +287,20 @@ impl App {
             }
         }
 
-        // Update service status periodically (for mode switching and install/uninstall detection)
-        self.service_installed = service::is_installed().unwrap_or(false);
-        self.service_running = service::is_running().unwrap_or(false);
+        // Update service status periodically (every 20 frames = ~320ms at 60 FPS)
+        // Reduces syscall overhead from checking service status every frame
+        self.poll_counter += 1;
+        if self.poll_counter >= 20 {
+            self.poll_counter = 0;
+            self.service_installed = service::is_installed().unwrap_or(false);
+            self.service_running = service::is_running().unwrap_or(false);
 
-        // Auto-start/stop monitor based on service state
-        if self.service_running && self.monitor_log_rx.is_none() {
-            self.start_monitor();
-        } else if !self.service_running && self.monitor_log_rx.is_some() {
-            self.stop_monitor();
+            // Auto-start/stop monitor based on service state
+            if self.service_running && self.monitor_log_rx.is_none() {
+                self.start_monitor();
+            } else if !self.service_running && self.monitor_log_rx.is_some() {
+                self.stop_monitor();
+            }
         }
     }
 
@@ -311,13 +366,13 @@ impl App {
             }
         };
 
-        let config = Config {
+        let bridge_config = BridgeConfig {
             serial_port: port,
-            baud_rate: DEFAULT_BAUD_RATE,
+            baud_rate: self.config.bridge.baud_rate,
             udp_port: self.udp_port,
         };
 
-        match bridge::start(config) {
+        match bridge::start(bridge_config) {
             Ok((handle, rx)) => {
                 self.bridge_handle = Some(handle);
                 self.bridge_log_rx = Some(rx);
@@ -430,12 +485,43 @@ impl App {
             }
         }
 
-        if self.logs.len() >= MAX_LOG_ENTRIES {
+        // Check if new entry matches filter (for auto-scroll update)
+        let entry_matches_filter = self.filter.matches(&entry);
+
+        let max_entries = self.config.logs.max_entries;
+        if self.logs.len() >= max_entries {
+            // Check if the entry being removed matches the filter
+            let removed_matches = self
+                .logs
+                .front()
+                .map(|e| self.filter.matches(e))
+                .unwrap_or(false);
             self.logs.pop_front();
+            // When paused, adjust scroll to compensate for removed filtered entry
+            if self.paused && removed_matches && self.scroll > 0 {
+                self.scroll = self.scroll.saturating_sub(1);
+            }
         }
         self.logs.push_back(entry);
-        if self.auto_scroll {
-            self.scroll = self.logs.len().saturating_sub(1);
+
+        // Only update scroll if auto_scroll AND the new entry matches the current filter
+        // AND not paused
+        if self.auto_scroll && entry_matches_filter && !self.paused {
+            let filtered_count = self.logs.iter().filter(|e| self.filter.matches(e)).count();
+            self.scroll = filtered_count.saturating_sub(1);
+        }
+    }
+
+    /// Toggle pause state
+    pub fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+        if self.paused {
+            self.auto_scroll = false;
+            self.set_status("Paused");
+        } else {
+            self.auto_scroll = true;
+            self.scroll_to_bottom();
+            self.set_status("Resumed");
         }
     }
 
@@ -447,20 +533,17 @@ impl App {
         self.scroll
     }
 
-    pub fn auto_scroll(&self) -> bool {
-        self.auto_scroll
-    }
-
     pub fn scroll_up(&mut self) {
         self.auto_scroll = false;
         self.scroll = self.scroll.saturating_sub(1);
     }
 
     pub fn scroll_down(&mut self) {
-        if self.scroll < self.logs.len().saturating_sub(1) {
+        let filtered_count = self.logs.iter().filter(|e| self.filter.matches(e)).count();
+        if self.scroll < filtered_count.saturating_sub(1) {
             self.scroll += 1;
         }
-        if self.scroll >= self.logs.len().saturating_sub(5) {
+        if self.scroll >= filtered_count.saturating_sub(5) {
             self.auto_scroll = true;
         }
     }
@@ -472,7 +555,8 @@ impl App {
 
     pub fn scroll_to_bottom(&mut self) {
         self.auto_scroll = true;
-        self.scroll = self.logs.len().saturating_sub(1);
+        let filtered_count = self.logs.iter().filter(|e| self.filter.matches(e)).count();
+        self.scroll = filtered_count.saturating_sub(1);
     }
 
     // ========================================================================
@@ -522,59 +606,44 @@ impl App {
         }
     }
 
-    /// Get current mode
-    pub fn mode(&self) -> AppMode {
-        self.mode
-    }
-
     // ========================================================================
     // Log filtering
     // ========================================================================
 
-    /// Get filtered logs (respects current filter settings)
-    pub fn filtered_logs(&self) -> impl Iterator<Item = &LogEntry> {
-        self.logs.iter().filter(|e| self.filter.matches(e))
-    }
-
-    /// Toggle protocol logs visibility
-    pub fn toggle_filter_protocol(&mut self) {
-        self.filter.show_protocol = !self.filter.show_protocol;
-    }
-
-    /// Toggle debug logs visibility
-    pub fn toggle_filter_debug(&mut self) {
-        self.filter.show_debug = !self.filter.show_debug;
-    }
-
-    /// Toggle incoming direction visibility
-    pub fn toggle_filter_in(&mut self) {
-        self.filter.show_direction_in = !self.filter.show_direction_in;
-    }
-
-    /// Toggle outgoing direction visibility
-    pub fn toggle_filter_out(&mut self) {
-        self.filter.show_direction_out = !self.filter.show_direction_out;
-    }
-
-    /// Set filter to show only protocol logs
+    /// Set filter to show only protocol logs (hides debug and system)
     pub fn filter_protocol_only(&mut self) {
         self.filter.show_protocol = true;
         self.filter.show_debug = false;
+        self.filter.show_system = false;
+        self.filter.show_direction_in = true;
+        self.filter.show_direction_out = true;
+        self.reset_scroll_for_filter();
     }
 
-    /// Set filter to show only debug logs
+    /// Set filter to show only debug logs (hides protocol and system)
     pub fn filter_debug_only(&mut self) {
         self.filter.show_protocol = false;
         self.filter.show_debug = true;
+        self.filter.show_system = false;
+        self.reset_scroll_for_filter();
     }
 
     /// Set filter to show all logs
     pub fn filter_show_all(&mut self) {
         self.filter.show_protocol = true;
         self.filter.show_debug = true;
+        self.filter.show_system = true;
         self.filter.show_direction_in = true;
         self.filter.show_direction_out = true;
         self.filter.message_types.clear();
+        self.reset_scroll_for_filter();
+    }
+
+    /// Reset scroll position when filter changes (scroll to end, enable auto-scroll)
+    fn reset_scroll_for_filter(&mut self) {
+        let filtered_count = self.logs.iter().filter(|e| self.filter.matches(e)).count();
+        self.scroll = filtered_count.saturating_sub(1);
+        self.auto_scroll = true;
     }
 
     /// Get current filter
@@ -582,9 +651,156 @@ impl App {
         &self.filter
     }
 
-    /// Get mutable filter reference (for advanced filter UI)
-    pub fn filter_mut(&mut self) -> &mut LogFilter {
-        &mut self.filter
+    /// Get current filter name for display
+    pub fn filter_name(&self) -> &str {
+        if self.filter.show_protocol && self.filter.show_debug && self.filter.show_system {
+            "All"
+        } else if self.filter.show_protocol && !self.filter.show_debug {
+            "Protocol"
+        } else if self.filter.show_debug && !self.filter.show_protocol {
+            "Debug"
+        } else {
+            "Custom"
+        }
+    }
+
+    /// Copy filtered logs to clipboard
+    pub fn copy_logs_to_clipboard(&mut self) {
+        let text: String = self
+            .logs
+            .iter()
+            .filter(|e| self.filter.matches(e))
+            .map(|entry| format_log_entry_text(entry))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => {
+                if let Err(e) = clipboard.set_text(&text) {
+                    self.set_status(format!("Clipboard error: {}", e));
+                } else {
+                    let count = self.logs.iter().filter(|e| self.filter.matches(e)).count();
+                    self.set_status(format!("Copied {} logs", count));
+                }
+            }
+            Err(e) => {
+                self.set_status(format!("Clipboard error: {}", e));
+            }
+        }
+    }
+
+    // ========================================================================
+    // Debug level filtering (D/I/W/E/A keys when in Debug mode)
+    // ========================================================================
+
+    /// Filter debug logs by level
+    pub fn filter_debug_level(&mut self, level: Option<LogLevel>) {
+        self.filter.debug_level = level;
+        self.reset_scroll_for_filter();
+        match level {
+            Some(LogLevel::Debug) => self.set_status("Debug: DEBUG only"),
+            Some(LogLevel::Info) => self.set_status("Debug: INFO only"),
+            Some(LogLevel::Warn) => self.set_status("Debug: WARN only"),
+            Some(LogLevel::Error) => self.set_status("Debug: ERROR only"),
+            None => self.set_status("Debug: All levels"),
+        }
+    }
+
+    // ========================================================================
+    // Export and config
+    // ========================================================================
+
+    /// Export logs to file and open it
+    pub fn export_logs(&mut self) {
+        use std::fs;
+        use std::io::Write;
+
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let filename = format!("oc-bridge-log-{}.txt", timestamp);
+
+        // Get path next to executable
+        let path = match std::env::current_exe() {
+            Ok(exe) => exe.parent().map(|p| p.join(&filename)),
+            Err(_) => None,
+        };
+
+        let path = match path {
+            Some(p) => p,
+            None => {
+                self.set_status("Cannot determine export path");
+                return;
+            }
+        };
+
+        // Collect logs (up to export_max)
+        let max_export = self.config.logs.export_max;
+        let logs: Vec<String> = self
+            .logs
+            .iter()
+            .filter(|e| self.filter.matches(e))
+            .rev()
+            .take(max_export)
+            .map(|e| format_log_entry_text(e))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+
+        // Write to file
+        match fs::File::create(&path) {
+            Ok(mut file) => {
+                for line in &logs {
+                    let _ = writeln!(file, "{}", line);
+                }
+                // Open file
+                if config::open_file(&path).is_ok() {
+                    self.set_status(format!("Exported {} logs", logs.len()));
+                } else {
+                    self.set_status("Exported but failed to open");
+                }
+            }
+            Err(e) => {
+                self.set_status(format!("Export failed: {}", e));
+            }
+        }
+    }
+
+    /// Open config file in editor
+    pub fn open_config(&mut self) {
+        match config::open_in_editor() {
+            Ok(_) => self.set_status("Config opened"),
+            Err(e) => self.set_status(format!("Cannot open config: {}", e)),
+        }
+    }
+}
+
+/// Format a log entry as plain text for clipboard
+fn format_log_entry_text(entry: &LogEntry) -> String {
+    match &entry.kind {
+        LogKind::Protocol {
+            direction,
+            message_name,
+            size,
+        } => {
+            let dir = match direction {
+                Direction::In => "←",
+                Direction::Out => "→",
+            };
+            format!("{} {} {} ({} B)", entry.timestamp, dir, message_name, size)
+        }
+        LogKind::Debug { level, message } => {
+            let level_str = match level {
+                Some(LogLevel::Debug) => "[DEBUG]",
+                Some(LogLevel::Info) => "[INFO]",
+                Some(LogLevel::Warn) => "[WARN]",
+                Some(LogLevel::Error) => "[ERROR]",
+                None => "",
+            };
+            format!("{} {} {}", entry.timestamp, level_str, message)
+        }
+        LogKind::System { message } => {
+            format!("{} [SYS] {}", entry.timestamp, message)
+        }
     }
 }
 

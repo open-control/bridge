@@ -49,16 +49,6 @@ impl Stats {
         self.rx_total.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
-    /// Get total transmitted bytes
-    pub fn tx_total(&self) -> u64 {
-        self.tx_total.load(Ordering::Relaxed)
-    }
-
-    /// Get total received bytes
-    pub fn rx_total(&self) -> u64 {
-        self.rx_total.load(Ordering::Relaxed)
-    }
-
     /// Update rate calculations and return (tx_kb_s, rx_kb_s)
     /// Call this periodically (e.g., every 500ms) from the UI thread
     pub fn update_rates(&self) -> (f64, f64) {
@@ -86,13 +76,6 @@ impl Stats {
         *last = now;
 
         (tx_rate, rx_rate)
-    }
-
-    /// Get cached rates without updating (tx_kb_s, rx_kb_s)
-    pub fn rates(&self) -> (f64, f64) {
-        let tx = f64::from_bits(self.tx_rate.load(Ordering::Relaxed));
-        let rx = f64::from_bits(self.rx_rate.load(Ordering::Relaxed));
-        (tx, rx)
     }
 
     /// Reset all counters

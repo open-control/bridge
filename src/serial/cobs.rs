@@ -1,7 +1,9 @@
 //! COBS (Consistent Overhead Byte Stuffing) framing
 //!
+//! Zero-allocation encoding/decoding using provided output buffers.
 //! Encodes data so 0x00 never appears in payload, allowing it as frame delimiter.
 
+use bytes::BytesMut;
 use std::fmt;
 
 pub const MAX_FRAME_SIZE: usize = 4096;
@@ -26,13 +28,18 @@ impl fmt::Display for CobsError {
 
 impl std::error::Error for CobsError {}
 
-/// Encode data using COBS, returns encoded data with trailing 0x00 delimiter
-pub fn encode(data: &[u8]) -> Result<Vec<u8>, CobsError> {
+/// Encode data using COBS into provided buffer (zero allocation)
+///
+/// Clears output buffer, encodes data with trailing 0x00 delimiter.
+/// Returns number of bytes written.
+pub fn encode_into(data: &[u8], output: &mut Vec<u8>) -> Result<usize, CobsError> {
     if data.len() > MAX_FRAME_SIZE - 2 {
         return Err(CobsError::FrameTooLarge(data.len()));
     }
 
-    let mut output = Vec::with_capacity(data.len() + (data.len() / 254) + 2);
+    output.clear();
+    output.reserve(data.len() + (data.len() / 254) + 2);
+
     let mut code_index = 0;
     output.push(0);
     let mut code: u8 = 1;
@@ -57,16 +64,21 @@ pub fn encode(data: &[u8]) -> Result<Vec<u8>, CobsError> {
 
     output[code_index] = code;
     output.push(DELIMITER);
-    Ok(output)
+    Ok(output.len())
 }
 
-/// Decode COBS-encoded data (without trailing delimiter)
-pub fn decode(encoded: &[u8]) -> Result<Vec<u8>, CobsError> {
+
+/// Decode COBS-encoded data into BytesMut (zero-copy friendly)
+///
+/// Input should NOT include trailing delimiter.
+/// Extends the BytesMut buffer (does not clear - caller should clear if needed).
+/// Returns number of bytes written.
+pub fn decode_into_bytes(encoded: &[u8], output: &mut BytesMut) -> Result<usize, CobsError> {
     if encoded.is_empty() {
-        return Ok(Vec::new());
+        return Ok(0);
     }
 
-    let mut output = Vec::with_capacity(encoded.len());
+    let start_len = output.len();
     let mut i = 0;
 
     while i < encoded.len() {
@@ -86,51 +98,11 @@ pub fn decode(encoded: &[u8]) -> Result<Vec<u8>, CobsError> {
         i += copy_len;
 
         if code < 255 && i < encoded.len() {
-            output.push(0);
+            output.extend_from_slice(&[0]);
         }
     }
 
-    Ok(output)
-}
-
-/// Streaming frame accumulator
-pub struct FrameAccumulator {
-    buffer: Vec<u8>,
-}
-
-impl FrameAccumulator {
-    pub fn new() -> Self {
-        Self {
-            buffer: Vec::with_capacity(MAX_FRAME_SIZE),
-        }
-    }
-
-    /// Feed bytes and extract complete decoded frames
-    pub fn feed(&mut self, data: &[u8]) -> Vec<Result<Vec<u8>, CobsError>> {
-        let mut frames = Vec::new();
-
-        for &byte in data {
-            if byte == DELIMITER {
-                if !self.buffer.is_empty() {
-                    frames.push(decode(&self.buffer));
-                    self.buffer.clear();
-                }
-            } else if self.buffer.len() < MAX_FRAME_SIZE {
-                self.buffer.push(byte);
-            } else {
-                frames.push(Err(CobsError::FrameTooLarge(self.buffer.len())));
-                self.buffer.clear();
-            }
-        }
-
-        frames
-    }
-}
-
-impl Default for FrameAccumulator {
-    fn default() -> Self {
-        Self::new()
-    }
+    Ok(output.len() - start_len)
 }
 
 #[cfg(test)]
@@ -148,19 +120,44 @@ mod tests {
             vec![0x01, 0x00, 0x02, 0x00, 0x03],
         ];
 
+        let mut encoded = Vec::new();
+        let mut decoded = BytesMut::new();
+
         for original in cases {
-            let encoded = encode(&original).unwrap();
-            let decoded = decode(&encoded[..encoded.len() - 1]).unwrap();
-            assert_eq!(original, decoded);
+            encode_into(&original, &mut encoded).unwrap();
+            // Decode without trailing delimiter
+            decoded.clear();
+            decode_into_bytes(&encoded[..encoded.len() - 1], &mut decoded).unwrap();
+            assert_eq!(original, decoded.as_ref());
         }
     }
 
     #[test]
     fn no_zeros_in_encoded() {
         let data = vec![0x00, 0x01, 0x00, 0x02, 0x00];
-        let encoded = encode(&data).unwrap();
+        let mut encoded = Vec::new();
+        encode_into(&data, &mut encoded).unwrap();
+        // Check all bytes except trailing delimiter
         for &byte in &encoded[..encoded.len() - 1] {
             assert_ne!(byte, 0x00);
         }
+    }
+
+    #[test]
+    fn buffer_reuse() {
+        let mut encoded = Vec::new();
+        let mut decoded = BytesMut::new();
+
+        // First encode/decode
+        encode_into(&[1, 2, 3], &mut encoded).unwrap();
+        decoded.clear();
+        decode_into_bytes(&encoded[..encoded.len() - 1], &mut decoded).unwrap();
+        assert_eq!(decoded.as_ref(), &[1, 2, 3]);
+
+        // Reuse buffers - should clear and work correctly
+        encode_into(&[4, 5], &mut encoded).unwrap();
+        decoded.clear();
+        decode_into_bytes(&encoded[..encoded.len() - 1], &mut decoded).unwrap();
+        assert_eq!(decoded.as_ref(), &[4, 5]);
     }
 }
