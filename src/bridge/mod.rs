@@ -155,8 +155,8 @@ pub fn start(config: Config) -> Result<(Handle, mpsc::Receiver<LogEntry>)> {
     let stats = Arc::new(Stats::new());
 
     let _ = log_tx.try_send(LogEntry::system(format!(
-        "Starting bridge: {} @ {} baud <-> UDP:{}",
-        config.serial_port, config.baud_rate, config.udp_port
+        "Starting bridge: {} <-> UDP:{}",
+        config.serial_port, config.udp_port
     )));
 
     // Spawn bridge task

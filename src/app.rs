@@ -368,7 +368,6 @@ impl App {
 
         let bridge_config = BridgeConfig {
             serial_port: port,
-            baud_rate: self.config.bridge.baud_rate,
             udp_port: self.udp_port,
         };
 

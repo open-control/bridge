@@ -1,198 +1,121 @@
 # Open Control Bridge
 
-Transparent Serial-to-TCP bridge for the open-control framework.
+Serial-to-UDP bridge for high-bandwidth communication between hardware controllers and DAW extensions.
 
-Forwards COBS-framed messages between a USB Serial device (Teensy 4.1) and a TCP socket (Bitwig extension).
+![Bridge TUI](docs/bridge-tui.png)
 
-## Features
+## Why Not MIDI SysEx?
 
-- **Auto-detection**: Automatically finds connected Teensy devices
-- **Cross-platform**: Windows, macOS, Linux
-- **Service mode**: Install as system service for hands-free operation
-- **Transparent**: Zero protocol knowledge, pure byte forwarding
-- **Minimal**: ~3MB binary, instant startup
+| | MIDI SysEx | USB Serial + UDP |
+|---|---|---|
+| Bandwidth | ~31.25 kbit/s | Full USB speed (480 Mbit/s) |
+| Encoding | 7-bit (overhead) | 8-bit native |
+| Latency | ~10-50ms | ~2-3ms |
+| Reliability | Lossy under load | Reliable |
 
-## Installation
-
-### From Release (Recommended)
-
-Download the latest release for your platform:
-- `oc-bridge-windows.exe`
-- `oc-bridge-macos`
-- `oc-bridge-linux`
-
-### From Source
-
-```bash
-# Native build (current platform)
-cargo build --release
-
-# Or use build scripts:
-./build.sh              # Linux/macOS
-.\build.ps1             # Windows PowerShell
-```
-
-## Building for Multiple Platforms
-
-### Prerequisites
-
-1. **Rust toolchain** (stable)
-2. **Target platforms** (install once):
-   ```bash
-   rustup target add x86_64-pc-windows-gnu      # Windows
-   rustup target add x86_64-unknown-linux-gnu   # Linux
-   ```
-
-### Native Compilation (Recommended)
-
-Build on each target platform for best compatibility:
-
-| Platform | Command |
-|----------|---------|
-| Windows  | `cargo build --release` |
-| Linux    | `cargo build --release` |
-| macOS    | `cargo build --release` |
-
-### Using Build Scripts
-
-**PowerShell (Windows):**
-```powershell
-.\build.ps1                    # Build for current platform
-.\build.ps1 -Target windows    # Build for Windows
-.\build.ps1 -Target linux      # Build for Linux (requires cross-compiler)
-.\build.ps1 -Target all        # Build all targets
-.\build.ps1 -Setup             # Install Rust targets
-.\build.ps1 -Clean             # Clean build artifacts
-```
-
-**Bash (Linux/macOS):**
-```bash
-./build.sh              # Build for current platform
-./build.sh windows      # Build for Windows (requires cross-compiler)
-./build.sh linux        # Build for Linux
-./build.sh all          # Build all targets
-./build.sh setup        # Install Rust targets
-./build.sh clean        # Clean build artifacts
-```
-
-**Make:**
-```bash
-make release            # Build for current platform
-make windows            # Build for Windows
-make linux              # Build for Linux
-make all                # Build all targets
-make setup-targets      # Install Rust targets
-```
-
-### Cross-Compilation
-
-Cross-compiling requires platform-specific linkers:
-
-| From | To | Required Linker |
-|------|-----|-----------------|
-| Linux | Windows | `x86_64-w64-mingw32-gcc` (mingw-w64) |
-| Windows | Linux | `x86_64-linux-gnu-gcc` (WSL or Docker) |
-
-**Recommended approach:** Build natively on each platform or use CI/CD.
-
-### Output
-
-Built binaries are placed in:
-- Native: `target/release/oc-bridge[.exe]`
-- Cross: `dist/{windows,linux}/oc-bridge[.exe]`
-
-## Usage
-
-### Quick Start
-
-```bash
-# Auto-detect Teensy and start bridge
-oc-bridge start
-
-# Specify port manually
-oc-bridge start --port COM3 --tcp-port 9000
-```
-
-### List Available Ports
-
-```bash
-oc-bridge list-ports
-```
-
-### Install as Service
-
-```bash
-# Install and start automatically on boot
-oc-bridge install
-
-# With specific port
-oc-bridge install --port COM3
-
-# Check status
-oc-bridge status
-
-# Uninstall
-oc-bridge uninstall
-```
+MIDI SysEx was designed for patch dumps, not real-time bidirectional communication. The bridge bypasses MIDI entirely using direct USB serial, enabling features like live parameter feedback, waveform displays, and responsive UI updates.
 
 ## Architecture
 
 ```
-┌──────────┐   USB Serial    ┌──────────┐    TCP       ┌─────────┐
-│ Teensy   │ ←─────────────→ │oc-bridge │ ←──────────→ │ Bitwig  │
-│   4.1    │   COBS frames   │          │  len-prefix  │  Java   │
-└──────────┘                 └──────────┘              └─────────┘
+┌──────────────┐    USB Serial     ┌────────────┐      UDP       ┌─────────────┐
+│   Teensy     │◄─────────────────►│  oc-bridge │◄──────────────►│   Bitwig    │
+│  Controller  │   COBS framing    │            │   :9000        │  Extension  │
+└──────────────┘                   └────────────┘                └─────────────┘
 ```
 
-### Framing
+Messages are defined using [protocol-codegen](https://github.com/open-control/protocol-codegen), which generates type-safe C++ (Teensy) and Java (Bitwig) code from Python definitions.
 
-- **Serial side**: COBS encoding with 0x00 delimiter
-- **TCP side**: 32-bit big-endian length prefix (Bitwig standard)
+## Quick Start
 
-### Performance
+### Download
 
-| Metric | Value |
-|--------|-------|
-| Bandwidth | ~10 Mbit/s |
-| Latency | ~2-3ms round-trip |
-| Messages/sec | 1000+ |
+Prebuilt binaries available in [Releases](https://github.com/open-control/bridge/releases):
+- `oc-bridge-windows.exe`
+- `oc-bridge-linux`
+
+### Run
+
+```bash
+# Launch TUI (auto-detects Teensy)
+oc-bridge
+
+# Headless mode
+oc-bridge --headless
+
+# Specify port manually
+oc-bridge --port COM3 --udp-port 9000
+```
+
+### TUI Controls
+
+| Key | Action |
+|-----|--------|
+| `S` | Start/Stop bridge |
+| `1` `2` `3` | Filter: Proto / Debug / All |
+| `P` | Pause log |
+| `C` | Copy log to clipboard |
+| `O` | Export log to file |
+| `F` | Edit config |
+| `Q` | Quit |
+
+### Windows Service
+
+```bash
+# Install (runs at startup, no window)
+oc-bridge    # then press 'I' in TUI
+
+# Or from command line (requires elevation)
+oc-bridge --install-service
+oc-bridge --uninstall-service
+```
 
 ## Configuration
 
-Config file location:
-- Windows: `%APPDATA%\open-control\bridge\config.toml`
-- macOS: `~/Library/Application Support/com.open-control.bridge/config.toml`
-- Linux: `~/.config/open-control/bridge/config.toml`
+Config file: `config.toml` (next to executable)
 
 ```toml
-# Optional: specify serial port (auto-detect if omitted)
-serial_port = "COM3"
+[bridge]
+serial_port = ""        # Empty = auto-detect Teensy
+udp_port = 9000
 
-# Serial baud rate (default: 2000000)
-baud_rate = 2000000
+[logs]
+max_entries = 200
+export_max = 2000
 
-# TCP port for Bitwig (default: 9000)
-tcp_port = 9000
-
-# Start minimized (for future GUI)
-start_minimized = false
-
-# Auto-start on system boot
-auto_start = true
+[ui]
+default_filter = "All"  # "Proto", "Debug", or "All"
 ```
 
-## Development
+## Build from Source
+
+### Prerequisites
+
+- [Rust](https://rustup.rs/) (stable)
+
+### Build
 
 ```bash
-# Run in development
-cargo run -- start --verbose
-
-# Run tests
-cargo test
-
-# Build release
 cargo build --release
 ```
+
+Binary: `target/release/oc-bridge` (or `.exe` on Windows)
+
+### Cross-compilation
+
+```bash
+# Linux → Windows (requires mingw-w64)
+rustup target add x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+## Protocol Integration
+
+The bridge is protocol-agnostic. Message encoding/decoding is handled by code generated from [protocol-codegen](https://github.com/open-control/protocol-codegen):
+
+1. Define messages in Python
+2. Generate C++ (Teensy) + Java (Bitwig)
+3. Bridge transparently forwards COBS frames ↔ UDP datagrams
 
 ## License
 

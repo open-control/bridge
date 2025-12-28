@@ -60,7 +60,6 @@ fn set_thread_high_priority() {}
 #[derive(Debug, Clone)]
 pub struct Config {
     pub serial_port: String,
-    pub baud_rate: u32,
     pub udp_port: u16,
 }
 
@@ -68,7 +67,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             serial_port: String::new(),
-            baud_rate: 2_000_000,
             udp_port: 9000,
         }
     }
@@ -141,7 +139,6 @@ pub async fn run_with_shutdown_and_logs(
         // Run a bridge session (returns when connection is lost)
         let session_config = Config {
             serial_port: port_name,
-            baud_rate: config.baud_rate,
             udp_port: config.udp_port,
         };
 
@@ -172,8 +169,8 @@ async fn run_bridge_session(
     stats: Arc<Stats>,
     log_tx: Option<mpsc::Sender<LogEntry>>,
 ) -> Result<()> {
-    // Open serial port
-    let serial_read = serial::open(&config.serial_port, config.baud_rate)?;
+    // Open serial port (USB CDC - full speed)
+    let serial_read = serial::open(&config.serial_port)?;
     let serial_write = serial_read.try_clone()?;
 
     // Bind UDP socket with SO_REUSEADDR (allows quick rebind after disconnect)
