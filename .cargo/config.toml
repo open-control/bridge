@@ -1,7 +1,22 @@
-# Use GNU toolchain on Windows (works with MSYS2/MinGW)
+# Cross-Platform Build Configuration
+# This file configures linkers for cross-compilation scenarios.
+# No default target is set - builds use the host platform by default.
+
+# Windows target (using MinGW-w64 GNU toolchain)
+# Required when cross-compiling TO Windows FROM Linux
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
 
-# Default to GNU target on this machine
-[build]
-target = "x86_64-pc-windows-gnu"
+# Linux target (using GNU toolchain)
+# Required when cross-compiling TO Linux FROM Windows
+# Install via: https://github.com/nicenature/docker-rust-xcompiler or WSL
+[target.x86_64-unknown-linux-gnu]
+linker = "x86_64-linux-gnu-gcc"
+
+# Native compilation (no cross-compiler needed):
+#   Windows: cargo build --release
+#   Linux:   cargo build --release
+#
+# Cross-compilation (requires cross-compiler):
+#   From Windows to Linux: cargo build --release --target x86_64-unknown-linux-gnu
+#   From Linux to Windows: cargo build --release --target x86_64-pc-windows-gnu

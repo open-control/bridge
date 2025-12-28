@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(find:*)",
+      "Bash(cmd.exe /c \"dir /s /b \"\"C:\\Program Files\\Microsoft Visual Studio\\2022\\*link.exe\"\" 2>nul\")",
+      "Bash(cmd.exe /c \"where /r \"\"C:\\Program Files\\Microsoft Visual Studio\"\" link.exe\")",
+      "Bash(cmd.exe /c \"where /r C:\\Progra~1\\Micros~1 link.exe\")",
+      "Bash(powershell.exe:*)",
+      "Bash(ls:*)",
+      "Bash(rustup show:*)",
+      "Bash(cargo clean:*)"
+    ]
+  }
+}
