@@ -31,6 +31,14 @@ fn main() -> Result<()> {
         return service::run_as_service();
     }
 
+    // Check if running in a terminal, if not (e.g., launched from desktop), relaunch in one
+    let headless = args.iter().any(|a| a == "--headless");
+    let no_relaunch = args.iter().any(|a| a == "--no-relaunch");
+
+    if !headless && !no_relaunch && !is_running_in_terminal() {
+        return relaunch_in_terminal();
+    }
+
     // Handle direct service actions (called from elevated re-launch)
     #[cfg(windows)]
     if args.iter().any(|a| a == "--install-service") {
@@ -41,8 +49,7 @@ fn main() -> Result<()> {
         return run_uninstall_service();
     }
 
-    // Parse minimal args
-    let headless = args.iter().any(|a| a == "--headless");
+    // Parse minimal args (headless already parsed above)
     let port = parse_arg(&args, "--port");
     let udp_port = parse_arg(&args, "--udp-port")
         .and_then(|s| s.parse().ok())
@@ -118,8 +125,91 @@ async fn run_headless(port: Option<String>, udp_port: u16) -> Result<()> {
         });
     }
 
+    // Create log broadcaster for service → TUI communication
+    let log_tx = bridge::log_broadcast::create_log_broadcaster();
+
+    // Convert std::sync::mpsc::Sender to tokio::sync::mpsc::Sender
+    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel(256);
+
+    // Spawn a task to forward logs from tokio channel to std channel (for UDP broadcast)
+    tokio::spawn(async move {
+        while let Some(entry) = tokio_rx.recv().await {
+            let _ = log_tx.send(entry);
+        }
+    });
+
     let stats = Arc::new(bridge::stats::Stats::new());
-    bridge::udp::run_with_shutdown(&config, shutdown, stats).await
+    bridge::udp::run_with_shutdown_and_logs(&config, shutdown, stats, Some(tokio_tx)).await
+}
+
+// ============================================================================
+// Terminal detection and auto-relaunch (for desktop launch support)
+// ============================================================================
+
+/// Check if the program is running in an interactive terminal
+fn is_running_in_terminal() -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        let handle = std::io::stdout().as_raw_handle();
+        // If we have a valid console handle, we're in a terminal
+        !handle.is_null()
+    }
+}
+
+/// Relaunch the program in a terminal emulator using freedesktop standards
+fn relaunch_in_terminal() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let exe_str = exe.to_string_lossy().to_string();
+
+    #[cfg(unix)]
+    {
+        // Try xdg-terminal-exec first (freedesktop.org standard)
+        if std::process::Command::new("xdg-terminal-exec")
+            .args([&exe_str, "--no-relaunch"])
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        // Try x-terminal-emulator (Debian/Ubuntu alternative)
+        if std::process::Command::new("x-terminal-emulator")
+            .args(["-e", &exe_str, "--no-relaunch"])
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        // Fallback: common terminals with standard -e flag
+        for term in ["ptyxis", "kgx", "gnome-terminal", "konsole", "xfce4-terminal", "xterm", "alacritty", "kitty"] {
+            if std::process::Command::new(term)
+                .args(["-e", &exe_str, "--no-relaunch"])
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!(
+            "No terminal emulator found. Install xdg-terminal-exec or run from a terminal."
+        );
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, use cmd.exe to open a new console window
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", &exe_str, "--no-relaunch"])
+            .spawn()?;
+        Ok(())
+    }
 }
 
 // ============================================================================

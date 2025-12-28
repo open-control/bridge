@@ -280,8 +280,8 @@ async fn run_bridge_session(
                 break;
             }
 
-            // Blocking recv with timeout (no spinning)
-            match write_rx.recv_timeout(Duration::from_millis(10)) {
+            // Blocking recv with timeout (1ms for low latency)
+            match write_rx.recv_timeout(Duration::from_millis(1)) {
                 Ok(data) => {
                     stats_writer.add_tx(data.len());
                     if port.write_all(&data).is_err() {

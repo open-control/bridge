@@ -76,6 +76,15 @@ pub fn is_elevated() -> bool {
 
 /// Check if elevation is required for a specific operation
 pub fn requires_elevation(operation: &str) -> bool {
+    // On Linux, systemd user services don't require elevation
+    // Serial port access is handled via pkexec inside service::install()
+    #[cfg(not(windows))]
+    {
+        let _ = operation;
+        false
+    }
+
+    #[cfg(windows)]
     match operation {
         "install" | "uninstall" => !is_elevated(),
         _ => false,

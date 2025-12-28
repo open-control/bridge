@@ -8,10 +8,11 @@
 linker = "x86_64-w64-mingw32-gcc"
 
 # Linux target (using GNU toolchain)
-# Required when cross-compiling TO Linux FROM Windows
+# Only needed when cross-compiling TO Linux FROM Windows
+# On native Linux, comment this out or use the default gcc
 # Install via: https://github.com/nicenature/docker-rust-xcompiler or WSL
-[target.x86_64-unknown-linux-gnu]
-linker = "x86_64-linux-gnu-gcc"
+# [target.x86_64-unknown-linux-gnu]
+# linker = "x86_64-linux-gnu-gcc"
 
 # Native compilation (no cross-compiler needed):
 #   Windows: cargo build --release
