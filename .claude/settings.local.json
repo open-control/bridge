@@ -11,5 +11,9 @@
       "Bash(rustup show:*)",
       "Bash(cargo clean:*)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "serena"
+  ],
+  "enableAllProjectMcpServers": true
 }
