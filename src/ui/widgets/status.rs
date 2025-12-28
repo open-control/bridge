@@ -46,7 +46,7 @@ impl Widget for StatusWidget<'_> {
 
         // Serial info
         let serial_text = if let Some(port) = &self.state.serial_port {
-            format!("{} @ 2Mbaud", port)
+            port.clone()
         } else {
             "Not detected".to_string()
         };

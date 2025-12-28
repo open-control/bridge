@@ -21,8 +21,6 @@ pub struct Config {
 pub struct BridgeConfig {
     /// Serial port (empty = auto-detect Teensy)
     pub serial_port: String,
-    /// Baud rate
-    pub baud_rate: u32,
     /// UDP port for Bitwig communication
     pub udp_port: u16,
 }
@@ -57,7 +55,6 @@ impl Default for BridgeConfig {
     fn default() -> Self {
         Self {
             serial_port: String::new(),
-            baud_rate: 2_000_000,
             udp_port: 9000,
         }
     }

@@ -187,7 +187,6 @@ fn run_service() -> Result<()> {
     rt.block_on(async {
         let config = crate::bridge::udp::Config {
             serial_port,
-            baud_rate: 2_000_000,
             udp_port,
         };
         let stats = Arc::new(crate::bridge::stats::Stats::new());

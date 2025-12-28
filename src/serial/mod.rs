@@ -30,12 +30,16 @@ pub fn detect_teensy() -> Result<String> {
     }
 }
 
-/// Open a serial port with the given settings
-pub fn open(port_name: &str, baud_rate: u32) -> Result<Box<dyn serialport::SerialPort>> {
+/// Open a serial port (USB CDC - baud rate ignored, full USB speed)
+pub fn open(port_name: &str) -> Result<Box<dyn serialport::SerialPort>> {
+    // Baud rate is ignored for USB CDC (Teensy) - uses native USB speed
+    // We pass a dummy value since serialport crate requires one
+    const USB_CDC_BAUD: u32 = 115200;
+
     #[cfg(windows)]
     {
         // Use open_native() on Windows to get COMPort which implements AsRawHandle
-        let port = serialport::new(port_name, baud_rate)
+        let port = serialport::new(port_name, USB_CDC_BAUD)
             .timeout(std::time::Duration::from_millis(1))
             .open_native()?;
         configure_windows_low_latency(&port);
@@ -44,7 +48,7 @@ pub fn open(port_name: &str, baud_rate: u32) -> Result<Box<dyn serialport::Seria
 
     #[cfg(not(windows))]
     {
-        let port = serialport::new(port_name, baud_rate)
+        let port = serialport::new(port_name, USB_CDC_BAUD)
             .timeout(std::time::Duration::from_millis(1))
             .open()?;
         Ok(port)
@@ -68,7 +72,12 @@ fn configure_windows_low_latency(port: &serialport::COMPort) {
     #[link(name = "kernel32")]
     extern "system" {
         fn SetCommTimeouts(hFile: *mut std::ffi::c_void, lpCommTimeouts: *const CommTimeouts) -> i32;
+        fn SetupComm(hFile: *mut std::ffi::c_void, dwInQueue: u32, dwOutQueue: u32) -> i32;
+        fn PurgeComm(hFile: *mut std::ffi::c_void, dwFlags: u32) -> i32;
     }
+
+    const PURGE_RXCLEAR: u32 = 0x0008;
+    const PURGE_TXCLEAR: u32 = 0x0004;
 
     // MAXDWORD for read_interval_timeout + 0 for all others = return immediately with available data
     let timeouts = CommTimeouts {
@@ -81,6 +90,14 @@ fn configure_windows_low_latency(port: &serialport::COMPort) {
 
     unsafe {
         let handle = port.as_raw_handle();
+
+        // Set larger buffers for high throughput (64KB each)
+        SetupComm(handle as *mut _, 65536, 65536);
+
+        // Clear any stale data in buffers
+        PurgeComm(handle as *mut _, PURGE_RXCLEAR | PURGE_TXCLEAR);
+
+        // Configure for immediate return
         SetCommTimeouts(handle as *mut _, &timeouts);
     }
 }

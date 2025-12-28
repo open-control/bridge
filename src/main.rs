@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const DEFAULT_UDP_PORT: u16 = 9000;
-const DEFAULT_BAUD_RATE: u32 = 2_000_000;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -86,14 +85,10 @@ async fn run_headless(port: Option<String>, udp_port: u16) -> Result<()> {
         }
     };
 
-    eprintln!(
-        "Starting bridge: {} @ {} baud <-> UDP:{}",
-        serial_port, DEFAULT_BAUD_RATE, udp_port
-    );
+    eprintln!("Starting bridge: {} <-> UDP:{}", serial_port, udp_port);
 
     let config = bridge::udp::Config {
         serial_port,
-        baud_rate: DEFAULT_BAUD_RATE,
         udp_port,
     };
 
