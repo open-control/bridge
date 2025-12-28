@@ -32,8 +32,55 @@ pub fn detect_teensy() -> Result<String> {
 
 /// Open a serial port with the given settings
 pub fn open(port_name: &str, baud_rate: u32) -> Result<Box<dyn serialport::SerialPort>> {
-    let port = serialport::new(port_name, baud_rate)
-        .timeout(std::time::Duration::from_millis(10))
-        .open()?;
-    Ok(port)
+    #[cfg(windows)]
+    {
+        // Use open_native() on Windows to get COMPort which implements AsRawHandle
+        let port = serialport::new(port_name, baud_rate)
+            .timeout(std::time::Duration::from_millis(1))
+            .open_native()?;
+        configure_windows_low_latency(&port);
+        Ok(Box::new(port))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let port = serialport::new(port_name, baud_rate)
+            .timeout(std::time::Duration::from_millis(1))
+            .open()?;
+        Ok(port)
+    }
+}
+
+/// Configure Windows serial port for minimal latency
+#[cfg(windows)]
+fn configure_windows_low_latency(port: &serialport::COMPort) {
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct CommTimeouts {
+        read_interval_timeout: u32,
+        read_total_timeout_multiplier: u32,
+        read_total_timeout_constant: u32,
+        write_total_timeout_multiplier: u32,
+        write_total_timeout_constant: u32,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetCommTimeouts(hFile: *mut std::ffi::c_void, lpCommTimeouts: *const CommTimeouts) -> i32;
+    }
+
+    // MAXDWORD for read_interval_timeout + 0 for all others = return immediately with available data
+    let timeouts = CommTimeouts {
+        read_interval_timeout: u32::MAX, // Return immediately when data available
+        read_total_timeout_multiplier: 0,
+        read_total_timeout_constant: 0,  // No wait - return immediately even if no data
+        write_total_timeout_multiplier: 0,
+        write_total_timeout_constant: 0,
+    };
+
+    unsafe {
+        let handle = port.as_raw_handle();
+        SetCommTimeouts(handle as *mut _, &timeouts);
+    }
 }
