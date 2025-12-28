@@ -24,8 +24,82 @@ Download the latest release for your platform:
 ### From Source
 
 ```bash
+# Native build (current platform)
 cargo build --release
+
+# Or use build scripts:
+./build.sh              # Linux/macOS
+.\build.ps1             # Windows PowerShell
 ```
+
+## Building for Multiple Platforms
+
+### Prerequisites
+
+1. **Rust toolchain** (stable)
+2. **Target platforms** (install once):
+   ```bash
+   rustup target add x86_64-pc-windows-gnu      # Windows
+   rustup target add x86_64-unknown-linux-gnu   # Linux
+   ```
+
+### Native Compilation (Recommended)
+
+Build on each target platform for best compatibility:
+
+| Platform | Command |
+|----------|---------|
+| Windows  | `cargo build --release` |
+| Linux    | `cargo build --release` |
+| macOS    | `cargo build --release` |
+
+### Using Build Scripts
+
+**PowerShell (Windows):**
+```powershell
+.\build.ps1                    # Build for current platform
+.\build.ps1 -Target windows    # Build for Windows
+.\build.ps1 -Target linux      # Build for Linux (requires cross-compiler)
+.\build.ps1 -Target all        # Build all targets
+.\build.ps1 -Setup             # Install Rust targets
+.\build.ps1 -Clean             # Clean build artifacts
+```
+
+**Bash (Linux/macOS):**
+```bash
+./build.sh              # Build for current platform
+./build.sh windows      # Build for Windows (requires cross-compiler)
+./build.sh linux        # Build for Linux
+./build.sh all          # Build all targets
+./build.sh setup        # Install Rust targets
+./build.sh clean        # Clean build artifacts
+```
+
+**Make:**
+```bash
+make release            # Build for current platform
+make windows            # Build for Windows
+make linux              # Build for Linux
+make all                # Build all targets
+make setup-targets      # Install Rust targets
+```
+
+### Cross-Compilation
+
+Cross-compiling requires platform-specific linkers:
+
+| From | To | Required Linker |
+|------|-----|-----------------|
+| Linux | Windows | `x86_64-w64-mingw32-gcc` (mingw-w64) |
+| Windows | Linux | `x86_64-linux-gnu-gcc` (WSL or Docker) |
+
+**Recommended approach:** Build natively on each platform or use CI/CD.
+
+### Output
+
+Built binaries are placed in:
+- Native: `target/release/oc-bridge[.exe]`
+- Cross: `dist/{windows,linux}/oc-bridge[.exe]`
 
 ## Usage
 
