@@ -1,0 +1,95 @@
+//! Centralized error types for the bridge
+//!
+//! All bridge errors are represented by the `BridgeError` enum.
+//! Use `Result<T>` as shorthand for `std::result::Result<T, BridgeError>`.
+
+use std::fmt;
+use std::path::PathBuf;
+
+/// All bridge errors
+#[derive(Debug)]
+pub enum BridgeError {
+    // === Transport ===
+    /// Failed to open serial port
+    SerialOpen {
+        port: String,
+        source: std::io::Error,
+    },
+    // === Network ===
+    /// Failed to bind UDP socket
+    UdpBind { port: u16, source: std::io::Error },
+
+    // === Config ===
+    /// Failed to read/write config file
+    ConfigRead {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// Invalid config value
+    ConfigValidation { field: &'static str, reason: String },
+
+    // === Service ===
+    /// Permission denied for service operation
+    ServicePermission { action: &'static str },
+    /// Service command failed
+    ServiceCommand { source: std::io::Error },
+
+    // === Detection ===
+    /// No device found matching configuration
+    NoDeviceFound,
+    /// Multiple devices found matching configuration
+    MultipleDevicesFound { count: usize },
+
+    // === Platform ===
+    /// Feature not supported on this platform
+    /// (used in cfg(unix) and cfg(not(windows/linux)) code paths)
+    #[allow(dead_code)]
+    PlatformNotSupported { feature: &'static str },
+
+    // === Runtime ===
+    /// Tokio runtime creation failed
+    Runtime { source: std::io::Error },
+}
+
+impl std::error::Error for BridgeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::SerialOpen { source, .. }
+            | Self::UdpBind { source, .. }
+            | Self::ConfigRead { source, .. }
+            | Self::ServiceCommand { source }
+            | Self::Runtime { source } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for BridgeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SerialOpen { port, .. } => write!(f, "Cannot open serial port: {}", port),
+            Self::UdpBind { port, .. } => write!(f, "Cannot bind UDP port {}", port),
+            Self::ConfigRead { path, .. } => {
+                write!(f, "Cannot read config: {}", path.display())
+            }
+            Self::ConfigValidation { field, reason } => {
+                write!(f, "Invalid {}: {}", field, reason)
+            }
+            Self::ServicePermission { action } => {
+                write!(f, "Permission denied for: {}", action)
+            }
+            Self::ServiceCommand { .. } => write!(f, "Service command failed"),
+            Self::NoDeviceFound => write!(f, "No device found"),
+            Self::MultipleDevicesFound { count } => {
+                write!(f, "Multiple devices found ({})", count)
+            }
+            Self::PlatformNotSupported { feature } => {
+                write!(f, "{} not supported on this platform", feature)
+            }
+            Self::Runtime { .. } => write!(f, "Failed to create runtime"),
+        }
+    }
+}
+
+/// Alias for Result with BridgeError
+pub type Result<T> = std::result::Result<T, BridgeError>;

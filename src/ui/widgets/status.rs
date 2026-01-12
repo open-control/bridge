@@ -1,99 +1,46 @@
-//! Status widget - displays bridge status in a clean 2-column layout
+//! Status widget - displays bridge status with responsive layout
+//!
+//! Shows source (Local/Service), mode, service state, and transport info.
 
+use crate::app::state::{ControllerTransport, ServiceState, Source};
 use crate::app::AppState;
-use crate::bridge::State as BridgeState;
-use crate::ui::theme::*;
+use crate::config::TransportMode;
+use crate::constants::WIDE_THRESHOLD;
+use crate::ui::theme::{
+    style_title, COLOR_LOG_RX, COLOR_LOG_TX, COLOR_MUTED, COLOR_RUNNING,
+    COLOR_STOPPED, STYLE_BORDER, STYLE_DIM, STYLE_LABEL, STYLE_VALUE,
+    SYMBOL_IN, SYMBOL_OUT,
+};
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
-    style::{Modifier, Style},
+    layout::{Constraint, Layout, Rect},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
+/// Status indicator symbols
+const SYMBOL_CONNECTED: &str = "●";
+const SYMBOL_DISCONNECTED: &str = "○";
+const SYMBOL_STOPPED_SQUARE: &str = "■";
+
 pub struct StatusWidget<'a> {
-    state: &'a AppState,
+    state: &'a AppState<'a>,
 }
 
 impl<'a> StatusWidget<'a> {
-    pub fn new(state: &'a AppState) -> Self {
+    pub fn new(state: &'a AppState<'a>) -> Self {
         Self { state }
+    }
+
+    fn is_wide(&self, width: u16) -> bool {
+        width > WIDE_THRESHOLD
     }
 }
 
 impl Widget for StatusWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Calculate column widths (equal split with separator)
-        let inner_width = area.width.saturating_sub(2) as usize; // minus borders
-        let col_width = inner_width / 2;
-
-        // Determine status
-        let (status_symbol, status_color, status_text) = if self.state.service_installed {
-            if self.state.service_running {
-                (SYMBOL_RUNNING, COLOR_RUNNING, "Running")
-            } else {
-                (SYMBOL_STOPPED, COLOR_STOPPED, "Stopped")
-            }
-        } else {
-            match self.state.bridge_state {
-                BridgeState::Running => (SYMBOL_RUNNING, COLOR_RUNNING, "Running"),
-                BridgeState::Starting => (SYMBOL_STARTING, COLOR_STARTING, "Starting"),
-                BridgeState::Stopping => (SYMBOL_STARTING, COLOR_STARTING, "Stopping"),
-                BridgeState::Error => (SYMBOL_ERROR, COLOR_ERROR, "Error"),
-                BridgeState::Stopped => (SYMBOL_STOPPED, COLOR_STOPPED, "Stopped"),
-            }
-        };
-
-        // Serial info
-        let serial_text = if let Some(port) = &self.state.serial_port {
-            port.clone()
-        } else {
-            "Not detected".to_string()
-        };
-        let serial_color = if self.state.serial_port.is_some() {
-            COLOR_VALUE
-        } else {
-            COLOR_STOPPED
-        };
-
-        // Traffic rates
-        let (tx_rate, rx_rate) = self.state.traffic_rates;
-
-        // Service info
-        let (service_symbol, service_text, service_color) = if self.state.service_installed {
-            if self.state.service_running {
-                (SYMBOL_RUNNING, "Running", COLOR_RUNNING)
-            } else {
-                (SYMBOL_STOPPED, "Stopped", COLOR_STOPPED)
-            }
-        } else {
-            (SYMBOL_NOT_INSTALLED, "Not installed", COLOR_MUTED)
-        };
-
-        // Filter name
-        let filter_name = &self.state.filter_name;
-
-        // Network text (needs to outlive the lines vec)
-        let network_text = format!("UDP:{}", self.state.udp_port);
-
-        // Build rows with equal column widths
-        let lines = vec![
-            build_row(
-                col_width,
-                ("Status", status_symbol, status_text, status_color),
-                ("Serial", &serial_text, serial_color),
-            ),
-            build_row(
-                col_width,
-                ("Service", service_symbol, service_text, service_color),
-                ("Network", &network_text, COLOR_VALUE),
-            ),
-            build_row_traffic(
-                col_width,
-                ("Filter", filter_name),
-                (tx_rate, rx_rate),
-            ),
-        ];
+        let is_wide = self.is_wide(area.width);
 
         // Title with optional status message
         let title = if let Some(msg) = &self.state.status_message {
@@ -106,69 +53,197 @@ impl Widget for StatusWidget<'_> {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(COLOR_BORDER))
-            .title(Span::styled(
-                title,
-                Style::default()
-                    .fg(COLOR_TITLE)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            .border_style(STYLE_BORDER)
+            .title(Span::styled(title, style_title()));
 
-        let paragraph = Paragraph::new(lines).block(block);
-        paragraph.render(area, buf);
+        // Render block and get inner area
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        if is_wide {
+            self.render_wide(inner, buf);
+        } else {
+            self.render_narrow(inner, buf);
+        }
     }
 }
 
-/// Build a row with two columns: left has symbol+text, right has label+value
-fn build_row<'a>(
-    col_width: usize,
-    left: (&'a str, &'a str, &'a str, ratatui::style::Color),
-    right: (&'a str, &'a str, ratatui::style::Color),
-) -> Line<'a> {
-    let (left_label, left_symbol, left_text, left_color) = left;
-    let (right_label, right_text, right_color) = right;
+impl StatusWidget<'_> {
+    /// Render wide layout: header line + two boxes side by side
+    fn render_wide(&self, area: Rect, buf: &mut Buffer) {
+        // Split into header (1 line) and boxes area (remaining)
+        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).split(area);
 
-    Line::from(vec![
-        Span::styled(
-            format!("  {:<8}  ", left_label),
-            Style::default().fg(COLOR_LABEL),
-        ),
-        Span::styled(format!("{} ", left_symbol), Style::default().fg(left_color)),
-        Span::styled(
-            format!("{:<width$}", left_text, width = col_width.saturating_sub(15)),
-            Style::default().fg(COLOR_VALUE),
-        ),
-        Span::styled("│  ", Style::default().fg(COLOR_DIM)),
-        Span::styled(format!("{:<8}  ", right_label), Style::default().fg(COLOR_LABEL)),
-        Span::styled(right_text.to_string(), Style::default().fg(right_color)),
-    ])
-}
+        // Header line
+        self.render_header(chunks[0], buf);
 
-/// Build a row for filter/traffic (special formatting)
-fn build_row_traffic(
-    col_width: usize,
-    left: (&str, &str),
-    traffic: (f64, f64),
-) -> Line<'static> {
-    let (left_label, left_text) = left;
-    let (tx_rate, rx_rate) = traffic;
+        // Two boxes side by side
+        let box_chunks =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(chunks[1]);
 
-    Line::from(vec![
-        Span::styled(
-            format!("  {:<8}  ", left_label),
-            Style::default().fg(COLOR_LABEL),
-        ),
-        Span::styled("  ", Style::default()),
-        Span::styled(
-            format!("{:<width$}", left_text, width = col_width.saturating_sub(15)),
-            Style::default().fg(COLOR_BRIGHT),
-        ),
-        Span::styled("│  ", Style::default().fg(COLOR_DIM)),
-        Span::styled("Traffic   ", Style::default().fg(COLOR_LABEL)),
-        Span::styled(format!("{} ", SYMBOL_OUT), Style::default().fg(COLOR_LOG_TX)),
-        Span::styled(format!("{:.1}", tx_rate), Style::default().fg(COLOR_VALUE)),
-        Span::styled("  ", Style::default()),
-        Span::styled(format!("{} ", SYMBOL_IN), Style::default().fg(COLOR_LOG_RX)),
-        Span::styled(format!("{:.1} KB/s", rx_rate), Style::default().fg(COLOR_VALUE)),
-    ])
+        self.render_controller_box(box_chunks[0], buf);
+        self.render_host_box(box_chunks[1], buf);
+    }
+
+    /// Render narrow layout: header + stacked boxes
+    fn render_narrow(&self, area: Rect, buf: &mut Buffer) {
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+        self.render_header(chunks[0], buf);
+        self.render_controller_box(chunks[1], buf);
+        self.render_host_box(chunks[2], buf);
+    }
+
+    /// Render header line: Source | Mode | Service status
+    fn render_header(&self, area: Rect, buf: &mut Buffer) {
+        // Source
+        let source_text = match self.state.source {
+            Source::Local => "Local",
+            Source::Service => "Service",
+        };
+
+        // Mode
+        let mode_text = match self.state.transport_mode {
+            TransportMode::Auto => "Auto",
+            TransportMode::Serial => "Serial",
+            TransportMode::Virtual => "Virtual",
+        };
+
+        // Build service status section (right side)
+        let service_spans = self.build_service_spans();
+
+        // Calculate spacing for right-alignment
+        let left_content = format!("  Source: {}    Mode: {}", source_text, mode_text);
+        let right_content_len = service_spans.iter().map(|s| s.content.len()).sum::<usize>();
+        let padding = area.width as usize - left_content.len() - right_content_len - 2;
+        let padding_str = " ".repeat(padding.max(1));
+
+        let mut spans = vec![
+            Span::styled("  Source: ", STYLE_LABEL),
+            Span::styled(source_text, STYLE_VALUE),
+            Span::styled("    Mode: ", STYLE_LABEL),
+            Span::styled(mode_text, STYLE_VALUE),
+            Span::raw(padding_str),
+        ];
+        spans.extend(service_spans);
+
+        Paragraph::new(Line::from(spans)).render(area, buf);
+    }
+
+    /// Build service status spans based on current state
+    fn build_service_spans(&self) -> Vec<Span<'static>> {
+        match self.state.source {
+            Source::Local => {
+                // Show service installation/running state
+                match self.state.service_state {
+                    ServiceState::NotInstalled => vec![
+                        Span::styled("Service: ", STYLE_LABEL),
+                        Span::styled(SYMBOL_DISCONNECTED, Style::new().fg(COLOR_MUTED)),
+                        Span::raw("  "),
+                    ],
+                    ServiceState::Stopped => vec![
+                        Span::styled("Service: ", STYLE_LABEL),
+                        Span::styled(SYMBOL_STOPPED_SQUARE, Style::new().fg(COLOR_STOPPED)),
+                        Span::raw("  "),
+                    ],
+                    ServiceState::Running => vec![
+                        Span::styled("Service: ", STYLE_LABEL),
+                        Span::styled(SYMBOL_CONNECTED, Style::new().fg(COLOR_RUNNING)),
+                        Span::raw("  "),
+                    ],
+                }
+            }
+            Source::Service => {
+                // Show service running + log connection status
+                let log_indicator = if self.state.log_connected {
+                    Span::styled(SYMBOL_CONNECTED, Style::new().fg(COLOR_RUNNING))
+                } else {
+                    Span::styled(SYMBOL_DISCONNECTED, Style::new().fg(COLOR_MUTED))
+                };
+
+                vec![
+                    Span::styled("Service: ", STYLE_LABEL),
+                    Span::styled(SYMBOL_CONNECTED, Style::new().fg(COLOR_RUNNING)),
+                    Span::styled(format!(" UDP:{} ", self.state.log_port), STYLE_VALUE),
+                    log_indicator,
+                    Span::raw("  "),
+                ]
+            }
+        }
+    }
+
+    /// Render Controller (IN) box
+    fn render_controller_box(&self, area: Rect, buf: &mut Buffer) {
+        let rx_rate = self.state.rx_rate;
+
+        // Transport info with indicator
+        let (indicator, indicator_color, transport_text) = match &self.state.controller_transport {
+            ControllerTransport::Serial { port } => {
+                (SYMBOL_CONNECTED, COLOR_RUNNING, format!("Serial:{}", port))
+            }
+            ControllerTransport::Virtual { port } => {
+                (SYMBOL_CONNECTED, COLOR_RUNNING, format!("UDP:{}", port))
+            }
+            ControllerTransport::Waiting => {
+                (SYMBOL_DISCONNECTED, COLOR_MUTED, "Waiting...".to_string())
+            }
+            ControllerTransport::Disconnected => {
+                (SYMBOL_DISCONNECTED, COLOR_STOPPED, "Disconnected".to_string())
+            }
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(STYLE_DIM)
+            .title(Span::styled(" Controller ", STYLE_LABEL));
+
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(indicator, Style::new().fg(indicator_color)),
+            Span::raw(" "),
+            Span::styled(transport_text, Style::new().fg(indicator_color)),
+            Span::styled("  ", STYLE_LABEL),
+            Span::styled(format!("{} ", SYMBOL_IN), Style::new().fg(COLOR_LOG_RX)),
+            Span::styled(format!("{:.1} KB/s", rx_rate), STYLE_VALUE),
+        ]);
+
+        Paragraph::new(line).render(inner, buf);
+    }
+
+    /// Render Host (OUT) box
+    fn render_host_box(&self, area: Rect, buf: &mut Buffer) {
+        let tx_rate = self.state.tx_rate;
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(STYLE_DIM)
+            .title(Span::styled(" Host ", STYLE_LABEL));
+
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(SYMBOL_CONNECTED, Style::new().fg(COLOR_RUNNING)),
+            Span::raw(" "),
+            Span::styled(
+                format!("UDP:{}", self.state.udp_port),
+                Style::new().fg(COLOR_RUNNING),
+            ),
+            Span::styled("  ", STYLE_LABEL),
+            Span::styled(format!("{} ", SYMBOL_OUT), Style::new().fg(COLOR_LOG_TX)),
+            Span::styled(format!("{:.1} KB/s", tx_rate), STYLE_VALUE),
+        ]);
+
+        Paragraph::new(line).render(inner, buf);
+    }
 }

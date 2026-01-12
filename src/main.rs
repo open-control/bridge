@@ -1,73 +1,80 @@
-//! Open Control Bridge - Serial to UDP bridge for open-control framework
+//! Open Control Bridge - Serial/UDP bridge for open-control framework
 //!
-//! Usage:
-//!   oc-bridge                     Run interactive TUI
-//!   oc-bridge --headless          Run headless (console)
-//!   oc-bridge --service           Run as Windows service (internal)
-//!   oc-bridge --install-service   Install and start service (elevated)
-//!   oc-bridge --uninstall-service Uninstall service (elevated)
+//! A high-performance bridge that relays protocol messages between
+//! a serial-connected controller and UDP-based hosts (e.g., Bitwig Studio).
+//!
+//! ## Usage
+//!
+//! ```text
+//! oc-bridge                    Run interactive TUI
+//! oc-bridge -v                 Run with verbose debug output
+//! oc-bridge install            Install as system service
+//! oc-bridge uninstall          Uninstall system service
+//! oc-bridge --help             Show all options
+//! ```
 
 mod app;
 mod bridge;
+mod bridge_state;
+mod cli;
+mod codec;
 mod config;
-mod elevation;
-mod serial;
+mod constants;
+mod error;
+mod input;
+mod logging;
+mod operations;
+mod platform;
+mod popup;
 mod service;
+mod transport;
 mod ui;
 
-use anyhow::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
-const DEFAULT_UDP_PORT: u16 = 9000;
+use clap::Parser;
+use cli::{is_running_in_terminal, relaunch_in_terminal, Cli, Command};
+use error::Result;
 
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
+    let cli = Cli::parse();
 
-    // Check for service mode first (Windows only)
+    // Handle Windows service mode first (internal, called by SCM)
     #[cfg(windows)]
-    if args.iter().any(|a| a == "--service") {
+    if let Some(Command::Service) = &cli.command {
         return service::run_as_service();
     }
 
-    // Check if running in a terminal, if not (e.g., launched from desktop), relaunch in one
-    let headless = args.iter().any(|a| a == "--headless");
-    let no_relaunch = args.iter().any(|a| a == "--no-relaunch");
+    // Initialize tracing for internal debug output
+    logging::init_tracing(cli.verbose);
 
-    if !headless && !no_relaunch && !is_running_in_terminal() {
+    // Check if running in a terminal, if not (e.g., launched from desktop), relaunch in one
+    if !cli.no_relaunch && !cli.headless && !is_running_in_terminal() {
         return relaunch_in_terminal();
     }
 
-    // Handle direct service actions (called from elevated re-launch)
-    #[cfg(windows)]
-    if args.iter().any(|a| a == "--install-service") {
-        return run_install_service(&args);
+    // Handle subcommands
+    match cli.command {
+        // Service management
+        Some(Command::Install { port, udp_port }) => run_install_service(port.as_deref(), udp_port),
+        Some(Command::Uninstall) => run_uninstall_service(),
+
+        // Internal elevated commands (Windows)
+        #[cfg(windows)]
+        Some(Command::InstallService { port, udp_port }) => {
+            run_install_service_elevated(port.as_deref(), udp_port)
+        }
+        #[cfg(windows)]
+        Some(Command::UninstallService) => run_uninstall_service_elevated(),
+
+        #[cfg(windows)]
+        Some(Command::Service) => unreachable!(), // Handled above
+
+        // Default: run TUI
+        None => {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| error::BridgeError::Runtime { source: e })?;
+            rt.block_on(run_tui())
+        }
     }
-    #[cfg(windows)]
-    if args.iter().any(|a| a == "--uninstall-service") {
-        return run_uninstall_service();
-    }
-
-    // Parse minimal args (headless already parsed above)
-    let port = parse_arg(&args, "--port");
-    let udp_port = parse_arg(&args, "--udp-port")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_UDP_PORT);
-
-    // Create tokio runtime
-    let rt = tokio::runtime::Runtime::new()?;
-
-    if headless {
-        rt.block_on(run_headless(port, udp_port))
-    } else {
-        rt.block_on(run_tui())
-    }
-}
-
-fn parse_arg(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == name)
-        .and_then(|i| args.get(i + 1).cloned())
 }
 
 async fn run_tui() -> Result<()> {
@@ -75,151 +82,52 @@ async fn run_tui() -> Result<()> {
     ui::run(&mut app).await
 }
 
-async fn run_headless(port: Option<String>, udp_port: u16) -> Result<()> {
-    // Detect or use provided port
-    let serial_port = match port {
-        Some(p) => p,
-        None => {
-            eprintln!("Auto-detecting Teensy...");
-            serial::detect_teensy()?
-        }
-    };
+// =============================================================================
+// Service installation (user-facing commands)
+// =============================================================================
 
-    eprintln!("Starting bridge: {} <-> UDP:{}", serial_port, udp_port);
-
-    let config = bridge::udp::Config {
-        serial_port,
-        udp_port,
-    };
-
-    // Setup shutdown handler
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
-
-    #[cfg(unix)]
-    {
-        tokio::spawn(async move {
-            let mut sigterm =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
-            let mut sigint =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
-
-            tokio::select! {
-                _ = sigterm.recv() => {},
-                _ = sigint.recv() => {},
-            }
-            shutdown_clone.store(true, Ordering::SeqCst);
-        });
-    }
-
+/// Install service - requests elevation if needed
+fn run_install_service(port: Option<&str>, udp_port: u16) -> Result<()> {
     #[cfg(windows)]
     {
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            shutdown_clone.store(true, Ordering::SeqCst);
-        });
-    }
-
-    // Create log broadcaster for service → TUI communication
-    let log_tx = bridge::log_broadcast::create_log_broadcaster();
-
-    // Convert std::sync::mpsc::Sender to tokio::sync::mpsc::Sender
-    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel(256);
-
-    // Spawn a task to forward logs from tokio channel to std channel (for UDP broadcast)
-    tokio::spawn(async move {
-        while let Some(entry) = tokio_rx.recv().await {
-            let _ = log_tx.send(entry);
+        // Build args for elevated process
+        let mut args = format!("install-service --udp-port {}", udp_port);
+        if let Some(p) = port {
+            args = format!("install-service --port {} --udp-port {}", p, udp_port);
         }
-    });
-
-    let stats = Arc::new(bridge::stats::Stats::new());
-    bridge::udp::run_with_shutdown_and_logs(&config, shutdown, stats, Some(tokio_tx)).await
-}
-
-// ============================================================================
-// Terminal detection and auto-relaunch (for desktop launch support)
-// ============================================================================
-
-/// Check if the program is running in an interactive terminal
-fn is_running_in_terminal() -> bool {
+        // Request elevation and re-run with internal command (visible window for CLI)
+        platform::run_elevated_action(&args)
+    }
     #[cfg(unix)]
     {
-        unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        let handle = std::io::stdout().as_raw_handle();
-        // If we have a valid console handle, we're in a terminal
-        !handle.is_null()
+        // On Unix, just install directly (systemd)
+        let _ = (port, udp_port);
+        service::install()
     }
 }
 
-/// Relaunch the program in a terminal emulator using freedesktop standards
-fn relaunch_in_terminal() -> Result<()> {
-    let exe = std::env::current_exe()?;
-    let exe_str = exe.to_string_lossy().to_string();
-
-    #[cfg(unix)]
-    {
-        // Try xdg-terminal-exec first (freedesktop.org standard)
-        if std::process::Command::new("xdg-terminal-exec")
-            .args([&exe_str, "--no-relaunch"])
-            .spawn()
-            .is_ok()
-        {
-            return Ok(());
-        }
-
-        // Try x-terminal-emulator (Debian/Ubuntu alternative)
-        if std::process::Command::new("x-terminal-emulator")
-            .args(["-e", &exe_str, "--no-relaunch"])
-            .spawn()
-            .is_ok()
-        {
-            return Ok(());
-        }
-
-        // Fallback: common terminals with standard -e flag
-        for term in ["ptyxis", "kgx", "gnome-terminal", "konsole", "xfce4-terminal", "xterm", "alacritty", "kitty"] {
-            if std::process::Command::new(term)
-                .args(["-e", &exe_str, "--no-relaunch"])
-                .spawn()
-                .is_ok()
-            {
-                return Ok(());
-            }
-        }
-
-        anyhow::bail!(
-            "No terminal emulator found. Install xdg-terminal-exec or run from a terminal."
-        );
-    }
-
+/// Uninstall service - requests elevation if needed
+fn run_uninstall_service() -> Result<()> {
     #[cfg(windows)]
     {
-        // On Windows, use cmd.exe to open a new console window
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", &exe_str, "--no-relaunch"])
-            .spawn()?;
-        Ok(())
+        // Request elevation (visible window for CLI)
+        platform::run_elevated_action("uninstall-service")
+    }
+    #[cfg(unix)]
+    {
+        service::uninstall()
     }
 }
 
-// ============================================================================
-// Service installation/uninstallation (called from elevated re-launch)
-// ============================================================================
+// =============================================================================
+// Elevated service operations (Windows internal)
+// =============================================================================
 
+/// Install service with elevation (called from elevated process)
 #[cfg(windows)]
-fn run_install_service(args: &[String]) -> Result<()> {
-    let port = parse_arg(args, "--port");
-    let udp_port = parse_arg(args, "--udp-port")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_UDP_PORT);
-
-    // Install service (runs hidden, no user interaction)
-    service::install(port.as_deref(), udp_port)?;
+fn run_install_service_elevated(port: Option<&str>, udp_port: u16) -> Result<()> {
+    // Install service
+    service::install(port, udp_port)?;
 
     // Configure ACL to allow current user to control the service
     let _ = service::configure_user_permissions();
@@ -230,8 +138,8 @@ fn run_install_service(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Uninstall service with elevation (called from elevated process)
 #[cfg(windows)]
-fn run_uninstall_service() -> Result<()> {
-    // Uninstall service (runs hidden, no user interaction)
+fn run_uninstall_service_elevated() -> Result<()> {
     service::uninstall()
 }

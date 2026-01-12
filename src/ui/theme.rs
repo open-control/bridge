@@ -1,11 +1,11 @@
 //! UI theme constants - Minimalist dark theme
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 
 // Base colors - muted grays
-pub const COLOR_DIM: Color = Color::Rgb(80, 80, 80);      // Very dim gray for borders, secondary
+pub const COLOR_DIM: Color = Color::Rgb(80, 80, 80); // Very dim gray for borders, secondary
 pub const COLOR_MUTED: Color = Color::Rgb(120, 120, 120); // Muted gray for labels
-pub const COLOR_TEXT: Color = Color::Rgb(180, 180, 180);  // Normal text
+pub const COLOR_TEXT: Color = Color::Rgb(180, 180, 180); // Normal text
 pub const COLOR_BRIGHT: Color = Color::Rgb(220, 220, 220); // Bright text for emphasis
 
 // Accent colors - used sparingly
@@ -23,23 +23,40 @@ pub const COLOR_VALUE: Color = COLOR_TEXT;
 // Status states
 pub const COLOR_RUNNING: Color = COLOR_SUCCESS;
 pub const COLOR_STOPPED: Color = COLOR_MUTED;
-pub const COLOR_STARTING: Color = COLOR_WARNING;
 
 // Log colors
-pub const COLOR_LOG_TX: Color = COLOR_SUCCESS;  // Outgoing (TX) - green
-pub const COLOR_LOG_RX: Color = COLOR_ACCENT;   // Incoming (RX) - cyan
+pub const COLOR_LOG_TX: Color = COLOR_SUCCESS; // Outgoing (TX) - green
+pub const COLOR_LOG_RX: Color = COLOR_ACCENT; // Incoming (RX) - cyan
 pub const COLOR_LOG_SYSTEM: Color = COLOR_MUTED;
 
 // Action bar
 pub const COLOR_KEY: Color = COLOR_ACCENT;
 pub const COLOR_ACTION: Color = COLOR_MUTED;
-pub const COLOR_ACTION_ACTIVE: Color = COLOR_BRIGHT;
 
-// Status symbols
-pub const SYMBOL_RUNNING: &str = "●";
-pub const SYMBOL_STOPPED: &str = "○";
-pub const SYMBOL_STARTING: &str = "◐";
-pub const SYMBOL_ERROR: &str = "✖";
-pub const SYMBOL_NOT_INSTALLED: &str = "–";
+// Traffic direction symbols
 pub const SYMBOL_IN: &str = "←";
 pub const SYMBOL_OUT: &str = "→";
+
+// =============================================================================
+// Pre-defined styles (reduces Style::default().fg() boilerplate)
+// =============================================================================
+
+pub const STYLE_DIM: Style = Style::new().fg(COLOR_DIM);
+pub const STYLE_MUTED: Style = Style::new().fg(COLOR_MUTED);
+pub const STYLE_TEXT: Style = Style::new().fg(COLOR_TEXT);
+pub const STYLE_BRIGHT: Style = Style::new().fg(COLOR_BRIGHT);
+pub const STYLE_LABEL: Style = Style::new().fg(COLOR_LABEL);
+pub const STYLE_VALUE: Style = Style::new().fg(COLOR_VALUE);
+pub const STYLE_BORDER: Style = Style::new().fg(COLOR_BORDER);
+pub const STYLE_KEY: Style = Style::new().fg(COLOR_KEY);
+pub const STYLE_ACTION: Style = Style::new().fg(COLOR_ACTION);
+
+#[inline]
+pub fn style_title() -> Style {
+    Style::new().fg(COLOR_TITLE).add_modifier(Modifier::BOLD)
+}
+
+#[inline]
+pub fn style_bold(color: Color) -> Style {
+    Style::new().fg(color).add_modifier(Modifier::BOLD)
+}

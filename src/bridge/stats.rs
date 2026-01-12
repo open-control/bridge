@@ -1,12 +1,13 @@
 //! Traffic statistics for the bridge
 //!
 //! Thread-safe counters for measuring bytes/sec throughput.
+//! Uses lock-free atomics for all operations.
 
+use crate::constants::RATE_UPDATE_MIN_INTERVAL_SECS;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::Instant;
 
-/// Traffic statistics with rate calculation
+/// Traffic statistics with rate calculation (fully lock-free)
 pub struct Stats {
     /// Total bytes transmitted (to serial)
     tx_total: AtomicU64,
@@ -16,11 +17,13 @@ pub struct Stats {
     tx_snapshot: AtomicU64,
     /// Snapshot of rx_total at last rate calculation
     rx_snapshot: AtomicU64,
-    /// Time of last rate calculation
-    last_calc: Mutex<Instant>,
-    /// Cached TX rate in bytes/sec
+    /// Reference instant for time calculations
+    start_time: Instant,
+    /// Nanoseconds since start_time at last rate calculation
+    last_calc_nanos: AtomicU64,
+    /// Cached TX rate in bytes/sec (stored as f64 bits)
     tx_rate: AtomicU64,
-    /// Cached RX rate in bytes/sec
+    /// Cached RX rate in bytes/sec (stored as f64 bits)
     rx_rate: AtomicU64,
 }
 
@@ -31,7 +34,8 @@ impl Stats {
             rx_total: AtomicU64::new(0),
             tx_snapshot: AtomicU64::new(0),
             rx_snapshot: AtomicU64::new(0),
-            last_calc: Mutex::new(Instant::now()),
+            start_time: Instant::now(),
+            last_calc_nanos: AtomicU64::new(0),
             tx_rate: AtomicU64::new(0),
             rx_rate: AtomicU64::new(0),
         }
@@ -52,12 +56,24 @@ impl Stats {
     /// Update rate calculations and return (tx_kb_s, rx_kb_s)
     /// Call this periodically (e.g., every 500ms) from the UI thread
     pub fn update_rates(&self) -> (f64, f64) {
-        let now = Instant::now();
-        let mut last = self.last_calc.lock().unwrap();
-        let elapsed = now.duration_since(*last).as_secs_f64();
+        let now_nanos = self.start_time.elapsed().as_nanos() as u64;
+        let last_nanos = self.last_calc_nanos.load(Ordering::Relaxed);
+        let elapsed = (now_nanos - last_nanos) as f64 / 1_000_000_000.0;
 
-        if elapsed < 0.1 {
+        if elapsed < RATE_UPDATE_MIN_INTERVAL_SECS {
             // Too soon, return cached values
+            let tx = f64::from_bits(self.tx_rate.load(Ordering::Relaxed));
+            let rx = f64::from_bits(self.rx_rate.load(Ordering::Relaxed));
+            return (tx, rx);
+        }
+
+        // Try to claim the update (avoid duplicate calculations)
+        if self
+            .last_calc_nanos
+            .compare_exchange(last_nanos, now_nanos, Ordering::SeqCst, Ordering::Relaxed)
+            .is_err()
+        {
+            // Another thread got there first, return cached values
             let tx = f64::from_bits(self.tx_rate.load(Ordering::Relaxed));
             let rx = f64::from_bits(self.rx_rate.load(Ordering::Relaxed));
             return (tx, rx);
@@ -73,20 +89,8 @@ impl Stats {
 
         self.tx_rate.store(tx_rate.to_bits(), Ordering::Relaxed);
         self.rx_rate.store(rx_rate.to_bits(), Ordering::Relaxed);
-        *last = now;
 
         (tx_rate, rx_rate)
-    }
-
-    /// Reset all counters
-    pub fn reset(&self) {
-        self.tx_total.store(0, Ordering::Relaxed);
-        self.rx_total.store(0, Ordering::Relaxed);
-        self.tx_snapshot.store(0, Ordering::Relaxed);
-        self.rx_snapshot.store(0, Ordering::Relaxed);
-        self.tx_rate.store(0, Ordering::Relaxed);
-        self.rx_rate.store(0, Ordering::Relaxed);
-        *self.last_calc.lock().unwrap() = Instant::now();
     }
 }
 

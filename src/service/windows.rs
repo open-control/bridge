@@ -1,91 +1,230 @@
-//! Windows Service implementation using windows-service crate
+//! Windows Service implementation using official Microsoft crates
+//!
+//! - `windows-services` for service runtime (responding to SCM commands)
+//! - `windows` crate for SCM management (install, uninstall, start, stop)
 
-use anyhow::{anyhow, Result};
-use std::ffi::OsString;
+use crate::cli::Cli;
+use crate::constants::CHANNEL_CAPACITY;
+use clap::Parser;
+use crate::error::{BridgeError, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use windows_service::{
-    define_windows_service,
-    service::{
-        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
-        ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
-    },
-    service_control_handler::{self, ServiceControlHandlerResult},
-    service_dispatcher,
-    service_manager::{ServiceManager, ServiceManagerAccess},
+
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST;
+use windows::Win32::System::Services::{
+    CloseServiceHandle, ControlService, CreateServiceW, DeleteService, OpenSCManagerW,
+    OpenServiceW, QueryServiceStatus, StartServiceW, SC_HANDLE, SC_MANAGER_ALL_ACCESS,
+    SC_MANAGER_CONNECT, SERVICE_ALL_ACCESS, SERVICE_AUTO_START, SERVICE_CONTROL_STOP,
+    SERVICE_ERROR_NORMAL, SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START, SERVICE_STATUS,
+    SERVICE_STOP, SERVICE_WIN32_OWN_PROCESS,
 };
 
 const SERVICE_NAME: &str = "OpenControlBridge";
 const SERVICE_DISPLAY_NAME: &str = "Open Control Bridge";
 const SERVICE_DESCRIPTION: &str = "Serial-to-UDP bridge for open-control framework";
-const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
-// Global shutdown flag for service
-static SERVICE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+// DELETE access right for service
+const DELETE: u32 = 0x00010000;
+
+// =============================================================================
+// Helper: Wide string conversion
+// =============================================================================
+
+fn to_wide(s: &str) -> Vec<u16> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+// =============================================================================
+// Helper: Map Windows errors to BridgeError
+// =============================================================================
+
+fn map_win_err(action: &'static str) -> impl FnOnce(windows::core::Error) -> BridgeError {
+    move |e| BridgeError::ServiceCommand {
+        source: std::io::Error::other(format!("{}: {}", action, e)),
+    }
+}
+
+// =============================================================================
+// Helper: RAII wrapper for SC_HANDLE
+// =============================================================================
+
+struct ScHandle(SC_HANDLE);
+
+impl ScHandle {
+    fn is_valid(&self) -> bool {
+        !self.0.is_invalid()
+    }
+}
+
+impl Drop for ScHandle {
+    fn drop(&mut self) {
+        if self.is_valid() {
+            unsafe {
+                let _ = CloseServiceHandle(self.0);
+            }
+        }
+    }
+}
+
+// =============================================================================
+// ServiceManager trait implementation
+// =============================================================================
+
+use super::ServiceManager;
+
+/// Windows service manager (unit struct, stateless)
+pub struct WindowsService;
+
+impl ServiceManager for WindowsService {
+    fn is_installed(&self) -> Result<bool> {
+        is_installed()
+    }
+
+    fn is_running(&self) -> Result<bool> {
+        is_running()
+    }
+
+    fn install(&self, serial_port: Option<&str>, udp_port: u16) -> Result<()> {
+        install(serial_port, udp_port)
+    }
+
+    fn uninstall(&self) -> Result<()> {
+        uninstall()
+    }
+
+    fn start(&self) -> Result<()> {
+        start()
+    }
+
+    fn stop(&self) -> Result<()> {
+        stop()
+    }
+}
+
+// =============================================================================
+// Service Management (using windows crate SCM APIs)
+// =============================================================================
 
 /// Check if service is installed
 pub fn is_installed() -> Result<bool> {
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-    match manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
-        Ok(_) => Ok(true),
-        Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1060) => Ok(false), // ERROR_SERVICE_DOES_NOT_EXIST
-        Err(e) => Err(anyhow!("Failed to query service: {}", e)),
+    let name = to_wide(SERVICE_NAME);
+
+    unsafe {
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
+            .map_err(map_win_err("open SCM"))?;
+        let scm = ScHandle(scm);
+
+        if !scm.is_valid() {
+            return Err(BridgeError::ServicePermission { action: "open SCM" });
+        }
+
+        let service = OpenServiceW(scm.0, PCWSTR::from_raw(name.as_ptr()), SERVICE_QUERY_STATUS);
+        match service {
+            Ok(h) => {
+                let _ = CloseServiceHandle(h);
+                Ok(true)
+            }
+            Err(e) if e.code() == ERROR_SERVICE_DOES_NOT_EXIST.into() => Ok(false),
+            Err(_) => Ok(false),
+        }
     }
 }
 
 /// Check if service is running
 pub fn is_running() -> Result<bool> {
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-    match manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
-        Ok(service) => {
-            let status = service.query_status()?;
-            Ok(status.current_state == ServiceState::Running)
+    let name = to_wide(SERVICE_NAME);
+
+    unsafe {
+        let scm = match OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) {
+            Ok(h) => ScHandle(h),
+            Err(_) => return Ok(false),
+        };
+
+        if !scm.is_valid() {
+            return Ok(false);
         }
-        Err(_) => Ok(false),
+
+        let service =
+            match OpenServiceW(scm.0, PCWSTR::from_raw(name.as_ptr()), SERVICE_QUERY_STATUS) {
+                Ok(h) => ScHandle(h),
+                Err(_) => return Ok(false),
+            };
+
+        let mut status = SERVICE_STATUS::default();
+        if QueryServiceStatus(service.0, &mut status).is_ok() {
+            Ok(status.dwCurrentState == SERVICE_RUNNING)
+        } else {
+            Ok(false)
+        }
     }
 }
 
 /// Install the service
-pub fn install(_serial_port: Option<&str>, _udp_port: u16) -> Result<()> {
-    let manager =
-        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)?;
+pub fn install(serial_port: Option<&str>, udp_port: u16) -> Result<()> {
+    let exe_path =
+        std::env::current_exe().map_err(|e| BridgeError::ServiceCommand { source: e })?;
 
-    let exe_path = std::env::current_exe()?;
-
-    // Build service arguments
-    let mut args = vec!["--service".to_string()];
-    if let Some(port) = _serial_port {
-        args.push("--port".to_string());
-        args.push(port.to_string());
+    // Build command line with arguments
+    let mut cmd = format!("\"{}\" --service", exe_path.display());
+    if let Some(port) = serial_port {
+        cmd.push_str(&format!(" --port {}", port));
     }
-    args.push("--udp-port".to_string());
-    args.push(_udp_port.to_string());
+    cmd.push_str(&format!(" --udp-port {}", udp_port));
 
-    let service_info = ServiceInfo {
-        name: OsString::from(SERVICE_NAME),
-        display_name: OsString::from(SERVICE_DISPLAY_NAME),
-        service_type: SERVICE_TYPE,
-        start_type: ServiceStartType::AutoStart,
-        error_control: ServiceErrorControl::Normal,
-        executable_path: exe_path,
-        launch_arguments: args.into_iter().map(OsString::from).collect(),
-        dependencies: vec![],
-        account_name: None, // LocalSystem
-        account_password: None,
-    };
+    let name = to_wide(SERVICE_NAME);
+    let display_name = to_wide(SERVICE_DISPLAY_NAME);
+    let cmd_wide = to_wide(&cmd);
 
-    // Delete existing service if any
-    if let Ok(existing) = manager.open_service(SERVICE_NAME, ServiceAccess::DELETE) {
-        let _ = existing.delete();
-        // Wait a bit for deletion
-        std::thread::sleep(Duration::from_millis(500));
+    unsafe {
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_ALL_ACCESS)
+            .map_err(map_win_err("open SCM for install"))?;
+        let scm = ScHandle(scm);
+
+        if !scm.is_valid() {
+            return Err(BridgeError::ServicePermission {
+                action: "open SCM for install",
+            });
+        }
+
+        // Delete existing service if any
+        if let Ok(existing) = OpenServiceW(scm.0, PCWSTR::from_raw(name.as_ptr()), DELETE) {
+            let _ = DeleteService(existing);
+            let _ = CloseServiceHandle(existing);
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        // Create new service
+        let service = CreateServiceW(
+            scm.0,
+            PCWSTR::from_raw(name.as_ptr()),
+            PCWSTR::from_raw(display_name.as_ptr()),
+            SERVICE_ALL_ACCESS,
+            SERVICE_WIN32_OWN_PROCESS,
+            SERVICE_AUTO_START,
+            SERVICE_ERROR_NORMAL,
+            PCWSTR::from_raw(cmd_wide.as_ptr()),
+            PCWSTR::null(), // no load order group
+            None,           // no tag
+            PCWSTR::null(), // no dependencies
+            PCWSTR::null(), // LocalSystem account
+            PCWSTR::null(), // no password
+        )
+        .map_err(map_win_err("create service"))?;
+
+        let _ = CloseServiceHandle(service);
     }
 
-    let service = manager.create_service(&service_info, ServiceAccess::CHANGE_CONFIG)?;
-
-    // Set description
-    service.set_description(SERVICE_DESCRIPTION)?;
+    // Set description via sc.exe (simpler than ChangeServiceConfig2W)
+    let _ = std::process::Command::new("sc")
+        .args(["description", SERVICE_NAME, SERVICE_DESCRIPTION])
+        .output();
 
     // Start the service
     start()?;
@@ -98,103 +237,170 @@ pub fn uninstall() -> Result<()> {
     // Stop first
     let _ = stop();
 
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-    let service = manager.open_service(SERVICE_NAME, ServiceAccess::DELETE)?;
-    service.delete()?;
+    let name = to_wide(SERVICE_NAME);
+
+    unsafe {
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
+            .map_err(map_win_err("open SCM for uninstall"))?;
+        let scm = ScHandle(scm);
+
+        if !scm.is_valid() {
+            return Err(BridgeError::ServicePermission {
+                action: "open SCM for uninstall",
+            });
+        }
+
+        let service = OpenServiceW(scm.0, PCWSTR::from_raw(name.as_ptr()), DELETE)
+            .map_err(map_win_err("open service for delete"))?;
+        let service = ScHandle(service);
+
+        if !service.is_valid() {
+            return Err(BridgeError::ServicePermission {
+                action: "open service for delete",
+            });
+        }
+
+        DeleteService(service.0).map_err(map_win_err("delete service"))?;
+    }
 
     Ok(())
 }
 
 /// Start the service
 pub fn start() -> Result<()> {
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-    let service = manager.open_service(SERVICE_NAME, ServiceAccess::START)?;
-    service.start::<String>(&[])?;
+    let name = to_wide(SERVICE_NAME);
+
+    unsafe {
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
+            .map_err(map_win_err("open SCM for start"))?;
+        let scm = ScHandle(scm);
+
+        if !scm.is_valid() {
+            return Err(BridgeError::ServicePermission {
+                action: "open SCM for start",
+            });
+        }
+
+        let service = OpenServiceW(scm.0, PCWSTR::from_raw(name.as_ptr()), SERVICE_START)
+            .map_err(map_win_err("open service for start"))?;
+        let service = ScHandle(service);
+
+        if !service.is_valid() {
+            return Err(BridgeError::ServicePermission {
+                action: "open service for start",
+            });
+        }
+
+        StartServiceW(service.0, None).map_err(map_win_err("start service"))?;
+    }
+
     Ok(())
 }
 
 /// Stop the service
 pub fn stop() -> Result<()> {
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-    let service = manager.open_service(SERVICE_NAME, ServiceAccess::STOP)?;
-    service.stop()?;
+    let name = to_wide(SERVICE_NAME);
+
+    unsafe {
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
+            .map_err(map_win_err("open SCM for stop"))?;
+        let scm = ScHandle(scm);
+
+        if !scm.is_valid() {
+            return Err(BridgeError::ServicePermission {
+                action: "open SCM for stop",
+            });
+        }
+
+        let service = OpenServiceW(scm.0, PCWSTR::from_raw(name.as_ptr()), SERVICE_STOP)
+            .map_err(map_win_err("open service for stop"))?;
+        let service = ScHandle(service);
+
+        if !service.is_valid() {
+            return Err(BridgeError::ServicePermission {
+                action: "open service for stop",
+            });
+        }
+
+        let mut status = SERVICE_STATUS::default();
+        ControlService(service.0, SERVICE_CONTROL_STOP, &mut status)
+            .map_err(map_win_err("stop service"))?;
+    }
+
     Ok(())
 }
 
-// ============================================================================
-// Service runtime (called when running as a service)
-// ============================================================================
-
-define_windows_service!(ffi_service_main, service_main);
+// =============================================================================
+// Service Runtime (using windows-services crate)
+// =============================================================================
 
 /// Entry point when running as a Windows service
 pub fn run_as_service() -> Result<()> {
-    service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
-    Ok(())
-}
+    // Initialize tracing for service mode
+    crate::logging::init_tracing(false);
 
-/// Service main function
-fn service_main(_arguments: Vec<OsString>) {
-    if let Err(e) = run_service() {
-        eprintln!("Service error: {}", e);
-    }
-}
-
-fn run_service() -> Result<()> {
-    // Parse command line arguments for port config
-    let args: Vec<String> = std::env::args().collect();
-    let port = parse_arg(&args, "--port");
-    let udp_port = parse_arg(&args, "--udp-port")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(9000);
+    // Parse command line arguments for port config using clap
+    let cli = Cli::try_parse().unwrap_or_default();
+    let port = cli.port;
+    let udp_port = cli.udp_port.unwrap_or(9000);
 
     // Create shutdown flag
     let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
+    let shutdown_for_handler = shutdown.clone();
 
-    // Register service control handler
-    let status_handle = service_control_handler::register(SERVICE_NAME, move |control| {
-        match control {
-            ServiceControl::Stop => {
-                shutdown_clone.store(true, Ordering::SeqCst);
-                SERVICE_SHUTDOWN.store(true, Ordering::SeqCst);
-                ServiceControlHandlerResult::NoError
+    // Spawn bridge logic in a separate thread
+    let bridge_handle = std::thread::spawn(move || {
+        run_bridge_logic(port, udp_port, shutdown);
+    });
+
+    // Run the service control handler (blocks until service stops)
+    let handler_result = windows_services::Service::new()
+        .can_stop()
+        .run(move |_service, command| {
+            if let windows_services::Command::Stop = command {
+                shutdown_for_handler.store(true, Ordering::SeqCst);
             }
-            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-            _ => ServiceControlHandlerResult::NotImplemented,
-        }
+        });
+    handler_result.map_err(|e| BridgeError::ServiceCommand {
+        source: std::io::Error::other(e),
     })?;
 
-    // Report running status
-    status_handle.set_service_status(ServiceStatus {
-        service_type: SERVICE_TYPE,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    })?;
+    // Wait for bridge thread to finish
+    let _ = bridge_handle.join();
 
-    // Use provided port or empty string to enable auto-detection with retry
-    let serial_port = port.unwrap_or_default();
+    Ok(())
+}
+
+/// Bridge logic running inside the service
+fn run_bridge_logic(port: Option<String>, udp_port: u16, shutdown: Arc<AtomicBool>) {
+    // Load config from file to get device_preset and other settings
+    let mut config = crate::config::load().bridge;
+
+    // Override with command-line arguments if provided
+    if let Some(p) = port {
+        config.serial_port = p;
+    }
+    if udp_port != 9000 {
+        config.udp_port = udp_port;
+    }
 
     // Create log broadcaster for service → TUI communication
-    let log_tx = crate::bridge::log_broadcast::create_log_broadcaster();
+    let log_tx = crate::logging::broadcast::create_log_broadcaster();
+    let _ = log_tx.send(crate::logging::LogEntry::system("Service bridge starting..."));
 
     // Create runtime and run bridge with log broadcasting
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => return,
+    };
+
     rt.block_on(async {
-        let config = crate::bridge::udp::Config {
-            serial_port,
-            udp_port,
-        };
         let stats = Arc::new(crate::bridge::stats::Stats::new());
 
         // Convert std::sync::mpsc::Sender to tokio::sync::mpsc::Sender
-        let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel(256);
+        let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
 
-        // Spawn a task to forward logs from std channel to tokio channel
+        // Spawn a task to forward logs from tokio channel to std channel
         let log_tx_clone = log_tx.clone();
         tokio::spawn(async move {
             while let Some(entry) = tokio_rx.recv().await {
@@ -202,58 +408,160 @@ fn run_service() -> Result<()> {
             }
         });
 
-        let _ = crate::bridge::udp::run_with_shutdown_and_logs(
-            &config,
-            shutdown,
-            stats,
-            Some(tokio_tx),
-        )
-        .await;
+        let _ = crate::bridge::run_with_shutdown(&config, shutdown, stats, Some(tokio_tx)).await;
     });
-
-    // Report stopped status
-    status_handle.set_service_status(ServiceStatus {
-        service_type: SERVICE_TYPE,
-        current_state: ServiceState::Stopped,
-        controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    })?;
-
-    Ok(())
 }
 
-fn parse_arg(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == name)
-        .and_then(|i| args.get(i + 1).cloned())
+// =============================================================================
+// SDDL Builder - Service Access Rights
+// =============================================================================
+
+/// Service access rights for SDDL (Security Descriptor Definition Language)
+mod sddl {
+    /// Access right codes for Windows services
+    pub mod rights {
+        pub const QUERY_CONFIG: &str = "CC";      // SERVICE_QUERY_CONFIG
+        pub const QUERY_STATUS: &str = "LC";      // SERVICE_QUERY_STATUS
+        pub const ENUM_DEPENDENTS: &str = "SW";   // SERVICE_ENUMERATE_DEPENDENTS
+        pub const START: &str = "RP";             // SERVICE_START
+        pub const STOP: &str = "WP";              // SERVICE_STOP
+        pub const PAUSE_CONTINUE: &str = "DT";    // SERVICE_PAUSE_CONTINUE
+        pub const INTERROGATE: &str = "LO";       // SERVICE_INTERROGATE
+        pub const USER_CONTROL: &str = "CR";      // SERVICE_USER_DEFINED_CONTROL
+        pub const READ_CONTROL: &str = "RC";      // READ_CONTROL
+        pub const DELETE: &str = "SD";            // DELETE
+        pub const WRITE_DAC: &str = "WD";         // WRITE_DAC
+        pub const WRITE_OWNER: &str = "WO";       // WRITE_OWNER
+    }
+
+    /// Well-known security identifiers (trustees)
+    pub mod trustees {
+        pub const SYSTEM: &str = "SY";            // Local SYSTEM account
+        pub const ADMINISTRATORS: &str = "BA";    // Built-in Administrators
+        pub const INTERACTIVE: &str = "IU";       // Interactive Users (logged-in)
+        pub const SERVICE: &str = "SU";           // Service Users
+    }
+
+    /// Build an "Allow" ACE (Access Control Entry)
+    pub fn allow(rights: &[&str], trustee: &str) -> String {
+        format!("(A;;{};;;{})", rights.concat(), trustee)
+    }
+
+    /// Build a complete DACL string
+    pub fn dacl(aces: &[String]) -> String {
+        format!("D:{}", aces.concat())
+    }
 }
+
+/// Build the SDDL for service permissions
+///
+/// Grants:
+/// - SYSTEM: full operational control
+/// - Administrators: full control including delete and modify DACL
+/// - Interactive Users: query, start, stop (allows non-admin control)
+/// - Service Users: same as interactive
+fn build_service_sddl() -> String {
+    use sddl::{rights::*, trustees::*};
+
+    // SYSTEM: operational control (no delete/modify permissions)
+    let system_ace = sddl::allow(
+        &[QUERY_CONFIG, QUERY_STATUS, ENUM_DEPENDENTS, START, STOP,
+          PAUSE_CONTINUE, INTERROGATE, USER_CONTROL, READ_CONTROL],
+        SYSTEM,
+    );
+
+    // Administrators: full control
+    let admin_ace = sddl::allow(
+        &[QUERY_CONFIG, DELETE, QUERY_STATUS, ENUM_DEPENDENTS, START, STOP,
+          PAUSE_CONTINUE, INTERROGATE, USER_CONTROL, READ_CONTROL,
+          WRITE_DAC, WRITE_OWNER],
+        ADMINISTRATORS,
+    );
+
+    // Interactive users: can query, start, stop (main feature)
+    let interactive_ace = sddl::allow(
+        &[QUERY_CONFIG, QUERY_STATUS, ENUM_DEPENDENTS, START, STOP,
+          INTERROGATE, READ_CONTROL],
+        INTERACTIVE,
+    );
+
+    // Service users: same as interactive
+    let service_ace = sddl::allow(
+        &[QUERY_CONFIG, QUERY_STATUS, ENUM_DEPENDENTS, START, STOP,
+          INTERROGATE, READ_CONTROL],
+        SERVICE,
+    );
+
+    sddl::dacl(&[system_ace, admin_ace, interactive_ace, service_ace])
+}
+
+// =============================================================================
+// Permissions
+// =============================================================================
 
 /// Configure service permissions to allow non-admin users to start/stop
 ///
-/// This sets an SDDL that grants Interactive Users (IU) the ability to
-/// query status, start, and stop the service without requiring elevation.
+/// Sets a custom Security Descriptor (SDDL) on the service to allow
+/// interactive users to start and stop it without administrator privileges.
 pub fn configure_user_permissions() -> Result<()> {
     use std::process::Command;
 
-    // SDDL breakdown:
-    // D: - DACL
-    // (A;;CCLCSWRPWPDTLOCRRC;;;SY) - SYSTEM: full control
-    // (A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA) - Administrators: full control
-    // (A;;CCLCSWRPWPLOCRRC;;;IU) - Interactive Users: query, start (RP), stop (WP), interrogate
-    // (A;;CCLCSWRPWPLOCRRC;;;SU) - Service Users: same
-    let sddl = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPLOCRRC;;;IU)(A;;CCLCSWRPWPLOCRRC;;;SU)";
+    let sddl = build_service_sddl();
 
     let output = Command::new("sc")
-        .args(["sdset", SERVICE_NAME, sddl])
-        .output()?;
+        .args(["sdset", SERVICE_NAME, &sddl])
+        .output()
+        .map_err(|e| BridgeError::ServiceCommand { source: e })?;
 
     if output.status.success() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(anyhow!("Failed to set service permissions: {}", stderr))
+        Err(BridgeError::ServicePermission {
+            action: "set service permissions",
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sddl_builder_produces_valid_sddl() {
+        let sddl = build_service_sddl();
+
+        // Must start with DACL header
+        assert!(sddl.starts_with("D:"), "SDDL must start with 'D:'");
+
+        // Must contain 4 ACEs (one for each trustee)
+        let ace_count = sddl.matches("(A;;").count();
+        assert_eq!(ace_count, 4, "Expected 4 ACEs (SYSTEM, Admins, Interactive, Service)");
+
+        // Must contain all trustees
+        assert!(sddl.contains(";;;SY)"), "Missing SYSTEM trustee");
+        assert!(sddl.contains(";;;BA)"), "Missing Administrators trustee");
+        assert!(sddl.contains(";;;IU)"), "Missing Interactive Users trustee");
+        assert!(sddl.contains(";;;SU)"), "Missing Service Users trustee");
+
+        // Interactive users must have START (RP) and STOP (WP) rights
+        let iu_section = sddl.split(";;;IU)").next().unwrap();
+        assert!(iu_section.contains("RP"), "Interactive users must have START (RP) right");
+        assert!(iu_section.contains("WP"), "Interactive users must have STOP (WP) right");
+    }
+
+    #[test]
+    fn test_sddl_allow_ace_format() {
+        let ace = sddl::allow(&["CC", "LC", "RP"], "SY");
+        assert_eq!(ace, "(A;;CCLCRP;;;SY)");
+    }
+
+    #[test]
+    fn test_sddl_dacl_format() {
+        let aces = vec![
+            "(A;;CC;;;SY)".to_string(),
+            "(A;;LC;;;BA)".to_string(),
+        ];
+        let dacl = sddl::dacl(&aces);
+        assert_eq!(dacl, "D:(A;;CC;;;SY)(A;;LC;;;BA)");
     }
 }
