@@ -1,15 +1,16 @@
 //! Terminal UI using ratatui
+//!
+//! Thin layer responsible only for terminal I/O. All business logic
+//! is delegated to App via handle_key() and handle_scroll().
 
 pub mod theme;
 pub mod widgets;
 
 use crate::app::App;
-use anyhow::Result;
+use crate::constants::FRAME_DURATION_MS;
+use crate::error::{BridgeError, Result};
 use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
-        MouseEventKind,
-    },
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -19,16 +20,21 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io;
-use widgets::{actions::ActionsWidget, log::LogWidget, status::StatusWidget};
+use widgets::{actions::ActionsWidget, log::LogWidget, mode::ModePopup, status::StatusWidget};
+
+/// Map io::Error to BridgeError::Runtime
+fn map_io_err(e: io::Error) -> BridgeError {
+    BridgeError::Runtime { source: e }
+}
 
 /// Run the TUI event loop
 pub async fn run(app: &mut App) -> Result<()> {
     // Setup terminal
-    enable_raw_mode()?;
+    enable_raw_mode().map_err(map_io_err)?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).map_err(map_io_err)?;
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = Terminal::new(backend).map_err(map_io_err)?;
 
     // Main loop
     loop {
@@ -36,110 +42,19 @@ pub async fn run(app: &mut App) -> Result<()> {
         app.poll();
 
         // Draw UI
-        terminal.draw(|f| draw(f, app))?;
+        terminal.draw(|f| draw(f, app)).map_err(map_io_err)?;
 
-        // Handle input with timeout (16ms = ~60 FPS)
-        if event::poll(std::time::Duration::from_millis(16))? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
-                        app.quit();
+        // Handle input with timeout
+        if event::poll(std::time::Duration::from_millis(FRAME_DURATION_MS)).map_err(map_io_err)? {
+            match event::read().map_err(map_io_err)? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if app.handle_key(key) {
                         break;
                     }
-                    KeyCode::Char('s') | KeyCode::Char('S') => {
-                        app.toggle_bridge();
-                    }
-                    KeyCode::Char('i') | KeyCode::Char('I') => {
-                        app.install_service();
-                    }
-                    KeyCode::Char('u') | KeyCode::Char('U') => {
-                        if app.state().service_installed {
-                            app.uninstall_service();
-                        }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('K') => {
-                        app.scroll_up();
-                    }
-                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('J') => {
-                        app.scroll_down();
-                    }
-                    KeyCode::PageUp => {
-                        for _ in 0..10 {
-                            app.scroll_up();
-                        }
-                    }
-                    KeyCode::PageDown => {
-                        for _ in 0..10 {
-                            app.scroll_down();
-                        }
-                    }
-                    KeyCode::Home => {
-                        app.scroll_to_top();
-                    }
-                    KeyCode::End => {
-                        app.scroll_to_bottom();
-                    }
-                    // Mode toggle
-                    KeyCode::Char('m') | KeyCode::Char('M') => {
-                        app.toggle_mode();
-                    }
-                    // Filter shortcuts
-                    KeyCode::Char('1') => {
-                        app.filter_protocol_only();
-                    }
-                    KeyCode::Char('2') => {
-                        app.filter_debug_only();
-                    }
-                    KeyCode::Char('3') => {
-                        app.filter_show_all();
-                    }
-                    // Copy logs to clipboard
-                    KeyCode::Char('c') | KeyCode::Char('C') => {
-                        app.copy_logs_to_clipboard();
-                    }
-                    // Pause toggle
-                    KeyCode::Char('p') | KeyCode::Char('P') => {
-                        app.toggle_pause();
-                    }
-                    // Export logs
-                    KeyCode::Char('o') | KeyCode::Char('O') => {
-                        app.export_logs();
-                    }
-                    // Open config
-                    KeyCode::Char('f') | KeyCode::Char('F') => {
-                        app.open_config();
-                    }
-                    // Debug level filters (only when in Debug mode)
-                    // Note: D/I/W/E/A only work when filter is "Debug"
-                    KeyCode::Char('d') => {
-                        if app.filter_name() == "Debug" {
-                            app.filter_debug_level(Some(crate::bridge::LogLevel::Debug));
-                        }
-                    }
-                    KeyCode::Char('w') => {
-                        if app.filter_name() == "Debug" {
-                            app.filter_debug_level(Some(crate::bridge::LogLevel::Warn));
-                        }
-                    }
-                    KeyCode::Char('e') => {
-                        if app.filter_name() == "Debug" {
-                            app.filter_debug_level(Some(crate::bridge::LogLevel::Error));
-                        }
-                    }
-                    KeyCode::Char('a') => {
-                        if app.filter_name() == "Debug" {
-                            app.filter_debug_level(None); // All levels
-                        }
-                    }
-                    _ => {}
-                },
+                }
                 Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        app.scroll_up();
-                    }
-                    MouseEventKind::ScrollDown => {
-                        app.scroll_down();
-                    }
+                    MouseEventKind::ScrollUp => app.handle_scroll(true),
+                    MouseEventKind::ScrollDown => app.handle_scroll(false),
                     _ => {}
                 },
                 _ => {}
@@ -152,27 +67,36 @@ pub async fn run(app: &mut App) -> Result<()> {
     }
 
     // Restore terminal
-    disable_raw_mode()?;
+    disable_raw_mode().map_err(map_io_err)?;
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    )
+    .map_err(map_io_err)?;
+    terminal.show_cursor().map_err(map_io_err)?;
 
     Ok(())
 }
 
 fn draw(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    let is_wide = area.width > 80;
+
+    // Status widget height depends on layout:
+    // - Wide: border(2) + header(1) + boxes side-by-side(4) = 7
+    // - Narrow: border(2) + header(1) + 2 stacked boxes(3+3) = 9
+    let status_height = if is_wide { 7 } else { 9 };
+
     let chunks = Layout::vertical([
-        Constraint::Length(5), // Status widget (reduced from 7)
-        Constraint::Min(5),    // Log widget
-        Constraint::Length(3), // Actions widget
+        Constraint::Length(status_height), // Status widget (responsive)
+        Constraint::Min(5),                // Log widget
+        Constraint::Length(3),             // Actions widget
     ])
-    .split(frame.area());
+    .split(area);
 
     let state = app.state();
-    let filter_name = app.filter_name();
+    let filter_mode = app.filter_mode();
 
     // Status widget
     let status = StatusWidget::new(&state);
@@ -182,12 +106,19 @@ fn draw(frame: &mut Frame, app: &App) {
     let log = LogWidget::new(
         app.logs(),
         app.filter(),
+        filter_mode,
         app.scroll_position(),
         state.paused,
     );
     frame.render_widget(log, chunks[1]);
 
     // Actions widget
-    let actions = ActionsWidget::new(&state, filter_name);
+    let actions = ActionsWidget::new(&state);
     frame.render_widget(actions, chunks[2]);
+
+    // Mode settings popup (rendered on top)
+    if let Some(settings) = app.mode_settings() {
+        let popup = ModePopup::new(settings);
+        frame.render_widget(popup, frame.area());
+    }
 }

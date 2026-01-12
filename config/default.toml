@@ -1,0 +1,24 @@
+# Open Control Bridge - Default Configuration
+#
+# This file provides base settings for the bridge.
+# Copy to config.toml to customize, or edit config.toml directly from the UI.
+#
+# Device presets are stored in config/devices/*.toml
+# Set device_preset to enable auto-detection (e.g., device_preset = "teensy")
+
+[bridge]
+transport_mode = "auto"
+serial_port = ""
+# device_preset = "teensy"  # Uncomment to enable auto-detection
+udp_port = 9000
+log_broadcast_port = 9002
+controller_name = "Controller"
+host_name = "Host"
+auto_timeout_secs = 5
+
+[logs]
+max_entries = 200
+export_max = 2000
+
+[ui]
+default_filter = "All"

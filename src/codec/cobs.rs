@@ -1,13 +1,16 @@
-//! COBS (Consistent Overhead Byte Stuffing) framing
+//! COBS (Consistent Overhead Byte Stuffing) encoding/decoding
 //!
-//! Zero-allocation encoding/decoding using provided output buffers.
 //! Encodes data so 0x00 never appears in payload, allowing it as frame delimiter.
+//! Zero-allocation using provided output buffers.
 
 use bytes::BytesMut;
 use std::fmt;
 
-pub const MAX_FRAME_SIZE: usize = 4096;
+/// COBS frame delimiter
 pub const DELIMITER: u8 = 0x00;
+
+/// Maximum frame size for COBS encoding
+pub const MAX_FRAME_SIZE: usize = 4096;
 
 #[derive(Debug)]
 pub enum CobsError {
@@ -19,7 +22,11 @@ impl fmt::Display for CobsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::FrameTooLarge(size) => {
-                write!(f, "Frame too large: {} bytes (max {})", size, MAX_FRAME_SIZE)
+                write!(
+                    f,
+                    "Frame too large: {} bytes (max {})",
+                    size, MAX_FRAME_SIZE
+                )
             }
             Self::InvalidEncoding => write!(f, "Invalid COBS encoding"),
         }
@@ -67,18 +74,18 @@ pub fn encode_into(data: &[u8], output: &mut Vec<u8>) -> Result<usize, CobsError
     Ok(output.len())
 }
 
-
 /// Decode COBS-encoded data into BytesMut (zero-copy friendly)
 ///
 /// Input should NOT include trailing delimiter.
-/// Extends the BytesMut buffer (does not clear - caller should clear if needed).
+/// Clears and fills the BytesMut buffer.
 /// Returns number of bytes written.
-pub fn decode_into_bytes(encoded: &[u8], output: &mut BytesMut) -> Result<usize, CobsError> {
+pub fn decode_into(encoded: &[u8], output: &mut BytesMut) -> Result<usize, CobsError> {
+    output.clear();
+
     if encoded.is_empty() {
         return Ok(0);
     }
 
-    let start_len = output.len();
     let mut i = 0;
 
     while i < encoded.len() {
@@ -102,7 +109,7 @@ pub fn decode_into_bytes(encoded: &[u8], output: &mut BytesMut) -> Result<usize,
         }
     }
 
-    Ok(output.len() - start_len)
+    Ok(output.len())
 }
 
 #[cfg(test)]
@@ -126,8 +133,7 @@ mod tests {
         for original in cases {
             encode_into(&original, &mut encoded).unwrap();
             // Decode without trailing delimiter
-            decoded.clear();
-            decode_into_bytes(&encoded[..encoded.len() - 1], &mut decoded).unwrap();
+            decode_into(&encoded[..encoded.len() - 1], &mut decoded).unwrap();
             assert_eq!(original, decoded.as_ref());
         }
     }
@@ -150,14 +156,12 @@ mod tests {
 
         // First encode/decode
         encode_into(&[1, 2, 3], &mut encoded).unwrap();
-        decoded.clear();
-        decode_into_bytes(&encoded[..encoded.len() - 1], &mut decoded).unwrap();
+        decode_into(&encoded[..encoded.len() - 1], &mut decoded).unwrap();
         assert_eq!(decoded.as_ref(), &[1, 2, 3]);
 
-        // Reuse buffers - should clear and work correctly
+        // Reuse buffers
         encode_into(&[4, 5], &mut encoded).unwrap();
-        decoded.clear();
-        decode_into_bytes(&encoded[..encoded.len() - 1], &mut decoded).unwrap();
+        decode_into(&encoded[..encoded.len() - 1], &mut decoded).unwrap();
         assert_eq!(decoded.as_ref(), &[4, 5]);
     }
 }
