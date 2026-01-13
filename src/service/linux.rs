@@ -295,11 +295,3 @@ pub fn stop() -> Result<()> {
         .map_err(map_io_err)?;
     Ok(())
 }
-
-pub fn restart() -> Result<()> {
-    Command::new("systemctl")
-        .args(["--user", "restart", SERVICE_NAME])
-        .status()
-        .map_err(map_io_err)?;
-    Ok(())
-}

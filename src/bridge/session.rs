@@ -14,7 +14,7 @@ use super::protocol::parse_message_name;
 use super::stats::Stats;
 use crate::codec::{Codec, Frame};
 use crate::error::Result;
-use crate::logging::LogEntry;
+use crate::logging::{self, LogEntry};
 use crate::transport::TransportChannels;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -169,11 +169,7 @@ impl<C: Codec> BridgeSession<C> {
         self.stats.add_tx(data.len());
 
         // Log protocol message
-        if let Some(ref tx) = self.log_tx {
-            if tx.try_send(LogEntry::protocol_out(&name, data.len())).is_err() {
-                warn!("Log channel full: protocol_out");
-            }
-        }
+        logging::try_log(&self.log_tx, LogEntry::protocol_out(&name, data.len()), "protocol_out");
 
         // Encode for controller transport (e.g., COBS for Serial)
         let mut encoded = Vec::with_capacity(data.len() + 16);

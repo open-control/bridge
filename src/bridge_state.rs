@@ -5,7 +5,7 @@
 
 use crate::bridge::{self, stats::Stats, Handle, State as BridgeState};
 use crate::config::{self, BridgeConfig, Config};
-use crate::constants::SOCKET_RELEASE_DELAY_MS;
+use crate::constants::{SERVICE_STATUS_POLL_INTERVAL, SOCKET_RELEASE_DELAY_MS};
 use crate::logging::{receiver as log_receiver, Direction, LogEntry, LogKind, LogStore};
 use crate::service;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,15 +38,13 @@ pub enum Bridge {
 }
 
 /// Service status cache (avoid syscalls every frame)
-pub struct ServiceStatus {
+pub struct ServiceStatusCache {
     pub installed: bool,
     pub running: bool,
     poll_counter: u32,
 }
 
-impl ServiceStatus {
-    const POLL_INTERVAL: u32 = 120; // ~2 seconds at 60fps
-
+impl ServiceStatusCache {
     pub fn new() -> Self {
         Self {
             installed: service::is_installed().unwrap_or(false),
@@ -58,7 +56,7 @@ impl ServiceStatus {
     /// Refresh status periodically (call every frame)
     pub fn poll(&mut self) {
         self.poll_counter += 1;
-        if self.poll_counter >= Self::POLL_INTERVAL {
+        if self.poll_counter >= SERVICE_STATUS_POLL_INTERVAL {
             self.poll_counter = 0;
             self.installed = service::is_installed().unwrap_or(false);
             self.running = service::is_running().unwrap_or(false);
@@ -75,9 +73,9 @@ impl ServiceStatus {
 
 impl Bridge {
     /// Create new bridge, auto-detecting serial port
-    pub fn new(cfg: &Config) -> (Self, ServiceStatus) {
+    pub fn new(cfg: &Config) -> (Self, ServiceStatusCache) {
         let serial_port = config::detect_serial(cfg);
-        let service_status = ServiceStatus::new();
+        let service_status = ServiceStatusCache::new();
 
         // Auto-start monitoring if service is already running
         let bridge = if service_status.running {
@@ -168,7 +166,7 @@ impl Bridge {
     // =========================================================================
 
     /// Poll for logs and state changes
-    pub fn poll(&mut self, cfg: &Config, svc: &mut ServiceStatus, logs: &mut LogStore) {
+    pub fn poll(&mut self, cfg: &Config, svc: &mut ServiceStatusCache, logs: &mut LogStore) {
         // Update service status cache
         svc.poll();
 
@@ -458,11 +456,11 @@ mod tests {
         assert_eq!(rx_rate, 0.0);
     }
 
-    // === ServiceStatus tests ===
+    // === ServiceStatusCache tests ===
 
     #[test]
     fn test_service_status_poll_increments() {
-        let mut status = ServiceStatus {
+        let mut status = ServiceStatusCache {
             installed: false,
             running: false,
             poll_counter: 0,
@@ -477,10 +475,10 @@ mod tests {
 
     #[test]
     fn test_service_status_poll_resets_at_interval() {
-        let mut status = ServiceStatus {
+        let mut status = ServiceStatusCache {
             installed: false,
             running: false,
-            poll_counter: ServiceStatus::POLL_INTERVAL - 1,
+            poll_counter: SERVICE_STATUS_POLL_INTERVAL - 1,
         };
 
         // This poll should trigger refresh and reset counter
@@ -490,9 +488,9 @@ mod tests {
 
     #[test]
     fn test_service_status_default_values() {
-        // ServiceStatus::new() calls service functions which may fail
+        // ServiceStatusCache::new() calls service functions which may fail
         // So we test the struct directly
-        let status = ServiceStatus {
+        let status = ServiceStatusCache {
             installed: true,
             running: false,
             poll_counter: 50,

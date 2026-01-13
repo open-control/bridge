@@ -9,13 +9,12 @@ use crate::codec::{CobsDebugCodec, RawCodec};
 use crate::config::BridgeConfig;
 use crate::constants::{POST_DISCONNECT_DELAY_SECS, RECONNECT_DELAY_SECS, UDP_BUFFER_SIZE};
 use crate::error::Result;
-use crate::logging::LogEntry;
+use crate::logging::{self, LogEntry};
 use crate::transport::{SerialTransport, Transport, UdpTransport};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::warn;
 
 /// Run in serial mode with auto-reconnection
 ///
@@ -38,22 +37,14 @@ pub(super) async fn serial_mode(
         let port_name = if config.serial_port.is_empty() {
             // Need device config for auto-detection
             let Some(ref dev_cfg) = device_config else {
-                if let Some(ref tx) = log_tx {
-                    if tx.try_send(LogEntry::system("No device preset configured")).is_err() {
-                        warn!("Log channel full: no_preset");
-                    }
-                }
+                logging::try_log(&log_tx, LogEntry::system("No device preset configured"), "no_preset");
                 tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
                 continue;
             };
 
             match SerialTransport::detect(dev_cfg) {
                 Ok(p) => {
-                    if let Some(ref tx) = log_tx {
-                        if tx.try_send(LogEntry::system(format!("Found {} on {}", dev_cfg.name, p))).is_err() {
-                            warn!("Log channel full: device_found");
-                        }
-                    }
+                    logging::try_log(&log_tx, LogEntry::system(format!("Found {} on {}", dev_cfg.name, p)), "device_found");
                     p
                 }
                 Err(_) => {
@@ -70,11 +61,7 @@ pub(super) async fn serial_mode(
         let controller = match SerialTransport::new(&port_name).spawn(shutdown.clone()) {
             Ok(c) => c,
             Err(e) => {
-                if let Some(ref tx) = log_tx {
-                    if tx.try_send(LogEntry::system(format!("Serial open failed: {}", e))).is_err() {
-                        warn!("Log channel full: serial_open_failed");
-                    }
-                }
+                logging::try_log(&log_tx, LogEntry::system(format!("Serial open failed: {}", e)), "serial_open_failed");
                 tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
                 continue;
             }
@@ -83,23 +70,15 @@ pub(super) async fn serial_mode(
         let host = match UdpTransport::new(config.udp_port).spawn(shutdown.clone()) {
             Ok(h) => h,
             Err(e) => {
-                if let Some(ref tx) = log_tx {
-                    if tx.try_send(LogEntry::system(format!("UDP bind failed: {}", e))).is_err() {
-                        warn!("Log channel full: udp_bind_failed");
-                    }
-                }
+                logging::try_log(&log_tx, LogEntry::system(format!("UDP bind failed: {}", e)), "udp_bind_failed");
                 return Err(e);
             }
         };
 
-        if let Some(ref tx) = log_tx {
-            if tx.try_send(LogEntry::system(format!(
-                "Connected: {} <-> UDP:{}",
-                port_name, config.udp_port
-            ))).is_err() {
-                warn!("Log channel full: connected");
-            }
-        }
+        logging::try_log(&log_tx, LogEntry::system(format!(
+            "Connected: {} <-> UDP:{}",
+            port_name, config.udp_port
+        )), "connected");
 
         // Run session
         let session = BridgeSession::new(
@@ -118,11 +97,7 @@ pub(super) async fn serial_mode(
         }
 
         // Connection lost, wait before retry
-        if let Some(ref tx) = log_tx {
-            if tx.try_send(LogEntry::system("Connection lost, reconnecting...")).is_err() {
-                warn!("Log channel full: connection_lost");
-            }
-        }
+        logging::try_log(&log_tx, LogEntry::system("Connection lost, reconnecting..."), "connection_lost");
         tokio::time::sleep(Duration::from_secs(POST_DISCONNECT_DELAY_SECS)).await;
     }
 
@@ -140,14 +115,10 @@ pub(super) async fn virtual_mode(
 ) -> Result<()> {
     let virtual_port = config.virtual_port.unwrap_or(9001);
 
-    if let Some(ref tx) = log_tx {
-        if tx.try_send(LogEntry::system(format!(
-            "Virtual mode: UDP:{} (controller) <-> UDP:{} (host)",
-            virtual_port, config.udp_port
-        ))).is_err() {
-            warn!("Log channel full: virtual_mode_start");
-        }
-    }
+    logging::try_log(&log_tx, LogEntry::system(format!(
+        "Virtual mode: UDP:{} (controller) <-> UDP:{} (host)",
+        virtual_port, config.udp_port
+    )), "virtual_mode_start");
 
     // Create transports
     let controller = UdpTransport::new(virtual_port).spawn(shutdown.clone())?;
@@ -158,11 +129,7 @@ pub(super) async fn virtual_mode(
 
     session.run(shutdown).await?;
 
-    if let Some(ref tx) = log_tx {
-        if tx.try_send(LogEntry::system("Virtual mode stopped")).is_err() {
-            warn!("Log channel full: virtual_mode_stopped");
-        }
-    }
+    logging::try_log(&log_tx, LogEntry::system("Virtual mode stopped"), "virtual_mode_stopped");
 
     Ok(())
 }
