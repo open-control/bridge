@@ -122,11 +122,45 @@ pub fn stop() -> Result<()> {
 }
 
 // ============================================================================
-// Platform-specific extensions
+// Internal commands (used by elevation mechanism)
 // ============================================================================
 
-/// Run as a Windows service (called from main when service subcommand is used)
-#[cfg(target_os = "windows")]
+/// Run as system service (internal, called by service manager)
+///
+/// Windows: Called by SCM when the service starts.
+/// Other platforms: Returns error (not applicable).
 pub fn run_as_service(port: Option<&str>, udp_port: u16) -> Result<()> {
-    windows::run_as_service(port, udp_port)
+    #[cfg(target_os = "windows")]
+    { windows::run_as_service(port, udp_port) }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (port, udp_port);
+        Err(crate::error::BridgeError::PlatformNotSupported {
+            feature: "service mode (Windows SCM only)",
+        })
+    }
+}
+
+/// Install service with elevation (internal command)
+///
+/// Called from elevated process after UAC prompt.
+/// Includes delay for service startup before process exits.
+pub fn install_elevated(port: Option<&str>, udp_port: u16) -> Result<()> {
+    install(port, udp_port)?;
+
+    // Brief delay for service to start before elevated process exits
+    #[cfg(target_os = "windows")]
+    std::thread::sleep(std::time::Duration::from_millis(
+        crate::constants::SERVICE_SCM_SETTLE_DELAY_MS,
+    ));
+
+    Ok(())
+}
+
+/// Uninstall service with elevation (internal command)
+///
+/// Called from elevated process after UAC prompt.
+pub fn uninstall_elevated() -> Result<()> {
+    uninstall()
 }

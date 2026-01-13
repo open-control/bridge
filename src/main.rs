@@ -36,8 +36,8 @@ use error::Result;
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Handle Windows service mode first (internal, called by SCM)
-    #[cfg(windows)]
+    // Handle service mode first (internal, called by service manager)
+    // Must be handled before tracing init as service mode has its own logging
     if let Some(Command::Service { port, udp_port }) = cli.command {
         return service::run_as_service(port.as_deref(), udp_port);
     }
@@ -52,19 +52,16 @@ fn main() -> Result<()> {
 
     // Handle subcommands
     match cli.command {
-        // Service management
-        Some(Command::Install { port, udp_port }) => run_install_service(port.as_deref(), udp_port),
-        Some(Command::Uninstall) => run_uninstall_service(),
+        // Service management (user-facing)
+        Some(Command::Install { port, udp_port }) => service::install(port.as_deref(), udp_port),
+        Some(Command::Uninstall) => service::uninstall(),
 
-        // Internal elevated commands (Windows)
-        #[cfg(windows)]
+        // Internal elevated commands (used by elevation mechanism)
         Some(Command::InstallService { port, udp_port }) => {
-            run_install_service_elevated(port.as_deref(), udp_port)
+            service::install_elevated(port.as_deref(), udp_port)
         }
-        #[cfg(windows)]
-        Some(Command::UninstallService) => run_uninstall_service_elevated(),
+        Some(Command::UninstallService) => service::uninstall_elevated(),
 
-        #[cfg(windows)]
         Some(Command::Service { .. }) => unreachable!(), // Handled above
 
         // Default: run TUI
@@ -79,40 +76,4 @@ fn main() -> Result<()> {
 async fn run_tui() -> Result<()> {
     let mut app = app::App::new();
     ui::run(&mut app).await
-}
-
-// =============================================================================
-// Service installation (user-facing commands)
-// =============================================================================
-
-/// Install service (handles elevation internally on Windows)
-fn run_install_service(port: Option<&str>, udp_port: u16) -> Result<()> {
-    service::install(port, udp_port)
-}
-
-/// Uninstall service (handles elevation internally on Windows)
-fn run_uninstall_service() -> Result<()> {
-    service::uninstall()
-}
-
-// =============================================================================
-// Elevated service operations (Windows internal)
-// =============================================================================
-
-/// Install service with elevation (called from elevated process)
-#[cfg(windows)]
-fn run_install_service_elevated(port: Option<&str>, udp_port: u16) -> Result<()> {
-    // service::install() handles ACL configuration when elevated
-    service::install(port, udp_port)?;
-
-    // Brief delay for service to start before elevated process exits
-    std::thread::sleep(std::time::Duration::from_millis(constants::SERVICE_SCM_SETTLE_DELAY_MS));
-
-    Ok(())
-}
-
-/// Uninstall service with elevation (called from elevated process)
-#[cfg(windows)]
-fn run_uninstall_service_elevated() -> Result<()> {
-    service::uninstall()
 }
