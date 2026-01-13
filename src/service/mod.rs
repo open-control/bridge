@@ -125,18 +125,6 @@ pub fn stop() -> Result<()> {
 // Platform-specific extensions
 // ============================================================================
 
-/// Configure service permissions to allow non-admin users to stop/start
-///
-/// Windows only: Modifies the service ACL to grant the current user
-/// SERVICE_START, SERVICE_STOP, and SERVICE_QUERY_STATUS rights.
-pub fn configure_user_permissions() -> Result<()> {
-    #[cfg(target_os = "windows")]
-    { windows::configure_user_permissions() }
-
-    #[cfg(not(target_os = "windows"))]
-    { Ok(()) }
-}
-
 /// Run as a Windows service (called from main when service subcommand is used)
 #[cfg(target_os = "windows")]
 pub fn run_as_service(port: Option<&str>, udp_port: u16) -> Result<()> {

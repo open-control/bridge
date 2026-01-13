@@ -16,6 +16,16 @@ pub const DEFAULT_VIRTUAL_PORT: u16 = 9003;
 pub const DEFAULT_LOG_BROADCAST_PORT: u16 = 9001;
 
 // =============================================================================
+// Timing - Service Operations
+// =============================================================================
+
+/// Delay for Windows SCM operations to settle (milliseconds)
+pub const SERVICE_SCM_SETTLE_DELAY_MS: u64 = 500;
+
+/// Delay for UDP socket release after monitoring shutdown (milliseconds)
+pub const SOCKET_RELEASE_DELAY_MS: u64 = 150;
+
+// =============================================================================
 // Timing - Reconnection
 // =============================================================================
 

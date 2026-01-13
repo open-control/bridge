@@ -3,7 +3,7 @@
 //! - `windows-services` for service runtime (responding to SCM commands)
 //! - `windows` crate for SCM management (install, uninstall, start, stop)
 
-use crate::constants::CHANNEL_CAPACITY;
+use crate::constants::{CHANNEL_CAPACITY, SERVICE_SCM_SETTLE_DELAY_MS};
 use crate::error::{BridgeError, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -165,7 +165,21 @@ pub fn is_running() -> Result<bool> {
 }
 
 /// Install the service
+///
+/// Handles elevation automatically:
+/// - If already elevated: performs SCM installation directly
+/// - If not elevated: launches elevated process via UAC
 pub fn install(serial_port: Option<&str>, udp_port: u16) -> Result<()> {
+    // Check elevation first - if not elevated, launch elevated process
+    if !crate::platform::is_elevated() {
+        let mut args = format!("install-service --udp-port {}", udp_port);
+        if let Some(port) = serial_port {
+            args = format!("install-service --port {} --udp-port {}", port, udp_port);
+        }
+        return crate::platform::run_elevated_action(&args);
+    }
+
+    // Already elevated - proceed with installation
     let exe_path =
         std::env::current_exe().map_err(|e| BridgeError::ServiceCommand { source: e })?;
 
@@ -195,7 +209,7 @@ pub fn install(serial_port: Option<&str>, udp_port: u16) -> Result<()> {
         if let Ok(existing) = OpenServiceW(scm.0, PCWSTR::from_raw(name.as_ptr()), DELETE) {
             let _ = DeleteService(existing);
             let _ = CloseServiceHandle(existing);
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(SERVICE_SCM_SETTLE_DELAY_MS));
         }
 
         // Create new service
@@ -227,11 +241,24 @@ pub fn install(serial_port: Option<&str>, udp_port: u16) -> Result<()> {
     // Start the service
     start()?;
 
+    // Configure ACL to allow non-admin users to start/stop
+    let _ = configure_user_permissions();
+
     Ok(())
 }
 
 /// Uninstall the service
+///
+/// Handles elevation automatically:
+/// - If already elevated: performs SCM uninstallation directly
+/// - If not elevated: launches elevated process via UAC
 pub fn uninstall() -> Result<()> {
+    // Check elevation first - if not elevated, launch elevated process
+    if !crate::platform::is_elevated() {
+        return crate::platform::run_elevated_action("uninstall-service");
+    }
+
+    // Already elevated - proceed with uninstallation
     // Stop first
     let _ = stop();
 

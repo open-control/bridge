@@ -2,9 +2,9 @@
 //!
 //! Copy, cut, clear, export, and pause operations on the log store.
 
+use super::operations::{self, ClipboardResult, ExportResult};
 use super::App;
 use crate::config;
-use crate::operations::{self, ClipboardResult, ExportResult};
 
 impl App {
     /// Toggle pause state
