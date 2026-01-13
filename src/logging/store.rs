@@ -169,21 +169,6 @@ impl LogStore {
         self.reset_scroll_for_filter();
     }
 
-    /// Set filter to show only protocol logs
-    pub fn set_filter_protocol_only(&mut self) {
-        self.set_filter(FilterMode::Protocol);
-    }
-
-    /// Set filter to show only debug logs
-    pub fn set_filter_debug_only(&mut self) {
-        self.set_filter(FilterMode::Debug);
-    }
-
-    /// Set filter to show all logs
-    pub fn set_filter_all(&mut self) {
-        self.set_filter(FilterMode::All);
-    }
-
     /// Set debug level filter
     pub fn set_debug_level(&mut self, level: Option<LogLevel>) {
         self.filter.debug_level = level;
@@ -330,7 +315,7 @@ mod tests {
         store.add(make_protocol_log("NoteOn", Direction::In));
         store.add(LogEntry::debug_log(Some(LogLevel::Info), "debug"));
 
-        store.set_filter_protocol_only();
+        store.set_filter(FilterMode::Protocol);
         assert_eq!(store.filtered_count(), 1);
     }
 
@@ -341,7 +326,7 @@ mod tests {
         store.add(make_protocol_log("NoteOn", Direction::In));
         store.add(LogEntry::debug_log(Some(LogLevel::Info), "debug"));
 
-        store.set_filter_debug_only();
+        store.set_filter(FilterMode::Debug);
         assert_eq!(store.filtered_count(), 1);
     }
 
@@ -435,7 +420,7 @@ mod tests {
         assert_eq!(store.filtered_count(), 2);
 
         // Filter to protocol only
-        store.set_filter_protocol_only();
+        store.set_filter(FilterMode::Protocol);
         assert_eq!(store.filtered_count(), 0);
 
         store.add(make_protocol_log("Test", Direction::In));

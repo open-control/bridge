@@ -79,16 +79,6 @@ pub fn configure_serial_low_latency(port: &serialport::COMPort) {
 // Elevation: UAC
 // =============================================================================
 
-/// Check if process is running with admin privileges
-///
-/// Uses Shell32 IsUserAnAdmin which correctly handles both:
-/// - UAC enabled: returns true only if elevated
-/// - UAC disabled: returns true if user is in Administrators group
-pub fn is_elevated() -> bool {
-    use windows::Win32::UI::Shell::IsUserAnAdmin;
-    unsafe { IsUserAnAdmin().as_bool() }
-}
-
 /// Run a specific action with elevated privileges (UAC prompt)
 ///
 /// The elevated process runs independently and the caller continues.

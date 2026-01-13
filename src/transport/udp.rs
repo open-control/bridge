@@ -15,7 +15,7 @@ use crate::error::{BridgeError, Result};
 use bytes::Bytes;
 use parking_lot::RwLock;
 use socket2::{Domain, Protocol, Socket, Type};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -133,8 +133,7 @@ impl Transport for UdpTransport {
 ///
 /// Retries a few times if the socket is still in use (e.g., from previous run).
 fn create_reusable_udp_socket(port: u16) -> Result<Arc<UdpSocket>> {
-    // 127.0.0.1:port with u16 port is always valid
-    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
     let map_err = |e| BridgeError::UdpBind { port, source: e };
 
     // Try up to MAX_SOCKET_RETRY_ATTEMPTS times with increasing delay

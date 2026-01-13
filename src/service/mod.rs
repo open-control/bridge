@@ -137,8 +137,8 @@ pub fn configure_user_permissions() -> Result<()> {
     { Ok(()) }
 }
 
-/// Run as a Windows service (called from main when --service flag is set)
+/// Run as a Windows service (called from main when service subcommand is used)
 #[cfg(target_os = "windows")]
-pub fn run_as_service() -> Result<()> {
-    windows::run_as_service()
+pub fn run_as_service(port: Option<&str>, udp_port: u16) -> Result<()> {
+    windows::run_as_service(port, udp_port)
 }

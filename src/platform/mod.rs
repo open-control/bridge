@@ -47,45 +47,6 @@ pub fn set_thread_high_priority() {
     windows::set_thread_high_priority();
 }
 
-/// Check if process is running with elevated privileges
-///
-/// - Windows: Checks UAC elevation token
-/// - Unix: Checks if euid == 0 (root)
-/// - Other: Returns false
-pub fn is_elevated() -> bool {
-    #[cfg(windows)]
-    {
-        windows::is_elevated()
-    }
-    #[cfg(all(unix, not(windows)))]
-    {
-        unsafe { libc::geteuid() == 0 }
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        false
-    }
-}
-
-/// Check if elevation is required for a specific operation
-///
-/// - Windows: Required for install/uninstall if not already elevated
-/// - Other: Not required (systemd user services, etc.)
-pub fn requires_elevation(operation: &str) -> bool {
-    #[cfg(windows)]
-    {
-        match operation {
-            "install" | "uninstall" => !is_elevated(),
-            _ => false,
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = operation;
-        false
-    }
-}
-
 /// Run an action with elevated privileges
 ///
 /// - Windows: Launches new process with UAC prompt (ShellExecuteW runas)

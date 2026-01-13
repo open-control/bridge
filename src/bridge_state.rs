@@ -381,6 +381,7 @@ impl Bridge {
         };
 
         let bridge_cfg = BridgeConfig {
+            transport_mode: if use_virtual { TransportMode::Virtual } else { TransportMode::Serial },
             serial_port: port_name,
             udp_port: cfg.bridge.udp_port,
             virtual_port,

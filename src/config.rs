@@ -249,7 +249,9 @@ pub fn load() -> Config {
     if !path.exists() {
         // Create default config file
         let config = Config::default();
-        let _ = save(&config);
+        if let Err(e) = save(&config) {
+            warn!("Failed to create default config: {}", e);
+        }
         return config;
     }
 

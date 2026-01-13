@@ -59,9 +59,22 @@ pub enum Command {
     Uninstall,
 
     /// Run as Windows service (internal, called by SCM)
+    ///
+    /// IMPORTANT: This must be a subcommand (not a flag like `--service`) because
+    /// clap parses the command line. The service binary path in SCM is set to:
+    ///   `"path\to\oc-bridge.exe" service --port COM3 --udp-port 9000`
+    ///
+    /// The arguments here MUST match those passed in the service binary path
+    /// (see `install()` in service/windows.rs), otherwise clap parsing fails
+    /// silently and `run_as_service()` is never called.
     #[cfg(windows)]
     #[command(hide = true)]
-    Service,
+    Service {
+        #[arg(long)]
+        port: Option<String>,
+        #[arg(long, default_value_t = 9000)]
+        udp_port: u16,
+    },
 
     /// Internal: install service with elevation
     #[command(hide = true)]
@@ -77,27 +90,6 @@ pub enum Command {
     #[command(hide = true)]
     #[cfg(windows)]
     UninstallService,
-}
-
-// =============================================================================
-// Legacy support (deprecated)
-// =============================================================================
-
-/// Parse a named argument from command line args
-///
-/// **Deprecated**: Use `Cli::parse()` instead.
-///
-/// # Example
-/// ```
-/// let args: Vec<String> = vec!["--port".into(), "COM3".into()];
-/// assert_eq!(parse_arg(&args, "--port"), Some("COM3".to_string()));
-/// ```
-#[deprecated(since = "0.2.0", note = "Use Cli::parse() with clap instead")]
-#[allow(dead_code)]
-pub fn parse_arg(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == name)
-        .and_then(|i| args.get(i + 1).cloned())
 }
 
 // =============================================================================
@@ -211,34 +203,5 @@ mod tests {
     fn test_cli_parse_uninstall() {
         let cli = Cli::parse_from(["oc-bridge", "uninstall"]);
         assert!(matches!(cli.command, Some(Command::Uninstall)));
-    }
-
-    // Legacy tests (deprecated function)
-    #[test]
-    #[allow(deprecated)]
-    fn test_parse_arg_found() {
-        let args = vec!["--port".into(), "COM3".into()];
-        assert_eq!(parse_arg(&args, "--port"), Some("COM3".to_string()));
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_parse_arg_not_found() {
-        let args = vec!["--other".into(), "value".into()];
-        assert_eq!(parse_arg(&args, "--port"), None);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_parse_arg_at_end() {
-        let args = vec!["--port".into()];
-        assert_eq!(parse_arg(&args, "--port"), None);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_parse_arg_empty() {
-        let args: Vec<String> = vec![];
-        assert_eq!(parse_arg(&args, "--port"), None);
     }
 }

@@ -46,10 +46,10 @@ impl App {
         }
 
         // Update config
-        self.config.bridge.transport_mode = settings.get_transport_mode();
+        self.config.bridge.transport_mode = settings.transport_mode;
         self.config.bridge.device_preset = settings.device_preset.clone();
         self.config.bridge.udp_port = settings.udp_port;
-        self.config.bridge.virtual_port = Some(settings.get_virtual_port());
+        self.config.bridge.virtual_port = Some(settings.virtual_port);
 
         // Save to file
         if let Err(e) = config::save(&self.config) {

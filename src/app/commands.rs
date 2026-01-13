@@ -5,7 +5,7 @@
 use super::App;
 use crate::constants::PAGE_SCROLL_LINES;
 use crate::input::AppCommand;
-use crate::logging::LogLevel;
+use crate::logging::{FilterMode, LogLevel};
 
 impl App {
     /// Execute an application command. Returns true if app should quit.
@@ -62,15 +62,15 @@ impl App {
                 false
             }
             AppCommand::FilterProtocol => {
-                self.logs.set_filter_protocol_only();
+                self.logs.set_filter(FilterMode::Protocol);
                 false
             }
             AppCommand::FilterDebug => {
-                self.logs.set_filter_debug_only();
+                self.logs.set_filter(FilterMode::Debug);
                 false
             }
             AppCommand::FilterAll => {
-                self.logs.set_filter_all();
+                self.logs.set_filter(FilterMode::All);
                 false
             }
             AppCommand::FilterDebugLevel(level) => {
