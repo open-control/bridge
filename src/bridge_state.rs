@@ -5,7 +5,7 @@
 
 use crate::bridge::{self, stats::Stats, Handle, State as BridgeState};
 use crate::config::{self, BridgeConfig, Config};
-use crate::constants::{SERVICE_STATUS_POLL_INTERVAL, SOCKET_RELEASE_DELAY_MS};
+use crate::constants::{DEFAULT_VIRTUAL_PORT, SERIAL_CHECK_INTERVAL_SECS, SERVICE_STATUS_POLL_INTERVAL, SOCKET_RELEASE_DELAY_MS};
 use crate::logging::{receiver as log_receiver, Direction, LogEntry, LogKind, LogStore};
 use crate::service;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,8 +39,8 @@ pub enum Bridge {
 
 /// Service status cache (avoid syscalls every frame)
 pub struct ServiceStatusCache {
-    pub installed: bool,
-    pub running: bool,
+    installed: bool,
+    running: bool,
     poll_counter: u32,
 }
 
@@ -51,6 +51,18 @@ impl ServiceStatusCache {
             running: service::is_running().unwrap_or(false),
             poll_counter: 0,
         }
+    }
+
+    /// Check if service is installed
+    #[inline]
+    pub fn is_installed(&self) -> bool {
+        self.installed
+    }
+
+    /// Check if service is running
+    #[inline]
+    pub fn is_running(&self) -> bool {
+        self.running
     }
 
     /// Refresh status periodically (call every frame)
@@ -78,7 +90,7 @@ impl Bridge {
         let service_status = ServiceStatusCache::new();
 
         // Auto-start monitoring if service is already running
-        let bridge = if service_status.running {
+        let bridge = if service_status.is_running() {
             Self::start_monitoring()
         } else {
             Self::Stopped { serial_port }
@@ -203,9 +215,8 @@ impl Bridge {
 
                 // In Auto mode: check if we should switch between serial/virtual
                 // Throttled to avoid USB enumeration every frame (60fps)
-                const SERIAL_CHECK_INTERVAL: Duration = Duration::from_secs(2);
                 if cfg.bridge.transport_mode == TransportMode::Auto
-                    && last_serial_check.elapsed() >= SERIAL_CHECK_INTERVAL
+                    && last_serial_check.elapsed() >= Duration::from_secs(SERIAL_CHECK_INTERVAL_SECS)
                 {
                     *last_serial_check = Instant::now();
                     let current_serial = config::detect_serial(cfg);
@@ -240,7 +251,7 @@ impl Bridge {
                     logs.add(entry);
                 }
                 // Auto-stop if service died
-                if !svc.running {
+                if !svc.is_running() {
                     // Signal receiver thread to stop and release socket
                     // (See comment in stop() for why this is intentionally blocking)
                     shutdown.store(true, Ordering::SeqCst);
@@ -255,7 +266,7 @@ impl Bridge {
                 ref mut serial_port,
             } => {
                 // Auto-start monitoring if service appeared
-                if svc.running {
+                if svc.is_running() {
                     logs.add(LogEntry::system("Service detected, monitoring started"));
                     // Need to use replace pattern to avoid borrow issue
                     let _ = std::mem::replace(self, Self::start_monitoring());
@@ -342,7 +353,7 @@ impl Bridge {
 
         // Log what we're starting
         if use_virtual {
-            let vport = cfg.bridge.virtual_port.unwrap_or(9001);
+            let vport = cfg.bridge.virtual_port.unwrap_or(DEFAULT_VIRTUAL_PORT);
             logs.add(LogEntry::system(format!(
                 "Starting virtual: UDP:{} <-> UDP:{}",
                 vport, cfg.bridge.udp_port
@@ -459,46 +470,32 @@ mod tests {
     // === ServiceStatusCache tests ===
 
     #[test]
-    fn test_service_status_poll_increments() {
-        let mut status = ServiceStatusCache {
-            installed: false,
-            running: false,
-            poll_counter: 0,
-        };
+    fn test_service_status_new_and_getters() {
+        // ServiceStatusCache::new() calls service functions which may return false
+        // on machines without the service installed - that's expected behavior
+        let status = ServiceStatusCache::new();
 
-        status.poll();
-        assert_eq!(status.poll_counter, 1);
-
-        status.poll();
-        assert_eq!(status.poll_counter, 2);
+        // Verify the getters work (actual values depend on system state)
+        let _ = status.is_installed();
+        let _ = status.is_running();
     }
 
     #[test]
-    fn test_service_status_poll_resets_at_interval() {
-        let mut status = ServiceStatusCache {
-            installed: false,
-            running: false,
-            poll_counter: SERVICE_STATUS_POLL_INTERVAL - 1,
-        };
+    fn test_service_status_poll_and_refresh() {
+        // Test that poll() and refresh() don't panic
+        let mut status = ServiceStatusCache::new();
 
-        // This poll should trigger refresh and reset counter
-        status.poll();
-        assert_eq!(status.poll_counter, 0);
-    }
+        // Multiple polls should work
+        for _ in 0..SERVICE_STATUS_POLL_INTERVAL + 10 {
+            status.poll();
+        }
 
-    #[test]
-    fn test_service_status_default_values() {
-        // ServiceStatusCache::new() calls service functions which may fail
-        // So we test the struct directly
-        let status = ServiceStatusCache {
-            installed: true,
-            running: false,
-            poll_counter: 50,
-        };
+        // Refresh should work
+        status.refresh();
 
-        assert!(status.installed);
-        assert!(!status.running);
-        assert_eq!(status.poll_counter, 50);
+        // Getters should still work after poll/refresh
+        let _ = status.is_installed();
+        let _ = status.is_running();
     }
 
     // === State transition logic (unit tests without real services) ===

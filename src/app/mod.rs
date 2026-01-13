@@ -15,7 +15,7 @@ pub use state::{AppState, ControllerTransport, ServiceState, Source};
 
 use crate::bridge_state::{Bridge, ServiceStatusCache};
 use crate::config::{self, Config, TransportMode};
-use crate::constants::{DEFAULT_VIRTUAL_PORT, SERVICE_SCM_SETTLE_DELAY_MS, STATUS_MESSAGE_TIMEOUT_SECS};
+use crate::constants::{DEFAULT_VIRTUAL_PORT, LOG_CONNECTION_TIMEOUT_SECS, SERVICE_SCM_SETTLE_DELAY_MS, STATUS_MESSAGE_TIMEOUT_SECS};
 use crate::input;
 use crate::logging::{FilterMode, LogEntry, LogFilter, LogStore};
 use crossterm::event::KeyEvent;
@@ -60,6 +60,34 @@ impl App {
         // - If service is running → Bridge::new() already started monitoring
         // - If nothing running → stay Stopped, wait for user action (S or I)
 
+        let controller_transport = Self::determine_transport(&cfg, &bridge);
+
+        let mut app = Self {
+            config: cfg,
+            bridge,
+            service_status,
+            logs,
+            controller_transport,
+            log_connected: false,
+            last_log_time: None,
+            service_stopped_for_local: false,
+            status_message: None,
+            should_quit: false,
+            mode_popup: None,
+        };
+
+        app.log_welcome_message();
+        app
+    }
+
+    /// Create App with explicit configuration (for testing)
+    ///
+    /// This allows tests to create an App without depending on config files.
+    #[cfg(test)]
+    pub fn new_with_config(cfg: Config) -> Self {
+        let max_entries = cfg.logs.max_entries;
+        let (bridge, service_status) = Bridge::new(&cfg);
+        let logs = LogStore::new(max_entries);
         let controller_transport = Self::determine_transport(&cfg, &bridge);
 
         let mut app = Self {
@@ -145,9 +173,9 @@ impl App {
 
     fn determine_source_and_service_state(&self) -> (Source, ServiceState) {
         // Service state
-        let service_state = if !self.service_status.installed {
+        let service_state = if !self.service_status.is_installed() {
             ServiceState::NotInstalled
-        } else if self.service_status.running {
+        } else if self.service_status.is_running() {
             ServiceState::Running
         } else {
             ServiceState::Stopped
@@ -179,8 +207,8 @@ impl App {
             self.last_log_time = Some(Instant::now());
             self.log_connected = true;
         } else if let Some(last) = self.last_log_time {
-            // Consider disconnected if no logs for 5 seconds
-            if last.elapsed().as_secs() > 5 {
+            // Consider disconnected if no logs for configured timeout
+            if last.elapsed().as_secs() > LOG_CONNECTION_TIMEOUT_SECS {
                 self.log_connected = false;
             }
         }
@@ -270,9 +298,11 @@ impl App {
     /// - Otherwise → simple toggle (start/stop local)
     pub fn toggle_local_bridge(&mut self) {
         // Case 1: Service is running → stop it to start local
-        if self.service_status.running {
+        if self.service_status.is_running() {
             self.logs.add(LogEntry::system("Stopping service to start local bridge..."));
-            let _ = crate::service::stop();
+            if let Err(e) = crate::service::stop() {
+                self.logs.add(LogEntry::system(format!("Warning: service stop failed: {}", e)));
+            }
             // Wait for service to stop before refreshing status.
             // Intentionally blocking - this is a sync method called from UI key handler,
             // and 500ms delay only happens on explicit user action (pressing 'S').
@@ -289,11 +319,13 @@ impl App {
         // Case 2: Local is running AND we had stopped service → stop local, restart service
         if matches!(self.bridge, Bridge::Running { .. })
             && self.service_stopped_for_local
-            && self.service_status.installed
+            && self.service_status.is_installed()
         {
             self.bridge.stop(&self.config, &mut self.logs);
             self.logs.add(LogEntry::system("Restarting service..."));
-            let _ = crate::service::start();
+            if let Err(e) = crate::service::start() {
+                self.logs.add(LogEntry::system(format!("Warning: service restart failed: {}", e)));
+            }
             std::thread::sleep(std::time::Duration::from_millis(SERVICE_SCM_SETTLE_DELAY_MS));
             self.service_status.refresh();
             self.service_stopped_for_local = false;
@@ -318,7 +350,7 @@ impl App {
 
     /// Toggle service (Alt+S key)
     pub fn toggle_service(&mut self) {
-        if !self.service_status.installed {
+        if !self.service_status.is_installed() {
             self.logs.add(LogEntry::system("Service not installed. Use 'I' to install."));
             return;
         }
@@ -326,7 +358,7 @@ impl App {
         // Always stop current bridge/monitoring first to release resources
         self.bridge.stop(&self.config, &mut self.logs);
 
-        if self.service_status.running {
+        if self.service_status.is_running() {
             // Stop service
             self.logs.add(LogEntry::system("Stopping service..."));
             match crate::service::stop() {
@@ -377,9 +409,11 @@ impl App {
         self.bridge.stop(&self.config, &mut self.logs);
 
         // Restart service if we had stopped it to run local
-        if self.service_stopped_for_local && self.service_status.installed {
+        if self.service_stopped_for_local && self.service_status.is_installed() {
             self.logs.add(LogEntry::system("Restarting service..."));
-            let _ = crate::service::start();
+            if let Err(e) = crate::service::start() {
+                tracing::warn!("Failed to restart service on quit: {}", e);
+            }
         }
 
         self.should_quit = true;

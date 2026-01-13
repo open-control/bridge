@@ -10,10 +10,10 @@
 pub const DEFAULT_UDP_PORT: u16 = 9000;
 
 /// Default UDP port for virtual controller mode
-pub const DEFAULT_VIRTUAL_PORT: u16 = 9003;
+pub const DEFAULT_VIRTUAL_PORT: u16 = 9001;
 
 /// Default UDP port for log broadcasting (service -> TUI)
-pub const DEFAULT_LOG_BROADCAST_PORT: u16 = 9001;
+pub const DEFAULT_LOG_BROADCAST_PORT: u16 = 9002;
 
 // =============================================================================
 // Timing - Service Operations
@@ -66,6 +66,12 @@ pub const AUTO_SCROLL_THRESHOLD: usize = 5;
 
 /// Service status polling interval (frames, ~2 seconds at 60fps)
 pub const SERVICE_STATUS_POLL_INTERVAL: u32 = 120;
+
+/// Interval for serial device check in Auto mode (seconds)
+pub const SERIAL_CHECK_INTERVAL_SECS: u64 = 2;
+
+/// Timeout before considering log connection lost (seconds)
+pub const LOG_CONNECTION_TIMEOUT_SECS: u64 = 5;
 
 /// Width threshold for wide/narrow layout switch
 pub const WIDE_THRESHOLD: u16 = 80;

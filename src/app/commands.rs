@@ -28,7 +28,7 @@ impl App {
                 false
             }
             AppCommand::UninstallService => {
-                if self.service_status.installed {
+                if self.service_status.is_installed() {
                     self.uninstall_service();
                 }
                 false

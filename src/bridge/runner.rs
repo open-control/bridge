@@ -7,7 +7,7 @@ use super::session::BridgeSession;
 use super::stats::Stats;
 use crate::codec::{CobsDebugCodec, RawCodec};
 use crate::config::BridgeConfig;
-use crate::constants::{POST_DISCONNECT_DELAY_SECS, RECONNECT_DELAY_SECS, UDP_BUFFER_SIZE};
+use crate::constants::{DEFAULT_VIRTUAL_PORT, POST_DISCONNECT_DELAY_SECS, RECONNECT_DELAY_SECS, UDP_BUFFER_SIZE};
 use crate::error::Result;
 use crate::logging::{self, LogEntry};
 use crate::transport::{SerialTransport, Transport, UdpTransport};
@@ -113,7 +113,7 @@ pub(super) async fn virtual_mode(
     stats: Arc<Stats>,
     log_tx: Option<mpsc::Sender<LogEntry>>,
 ) -> Result<()> {
-    let virtual_port = config.virtual_port.unwrap_or(9001);
+    let virtual_port = config.virtual_port.unwrap_or(DEFAULT_VIRTUAL_PORT);
 
     logging::try_log(&log_tx, LogEntry::system(format!(
         "Virtual mode: UDP:{} (controller) <-> UDP:{} (host)",
