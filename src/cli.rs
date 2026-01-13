@@ -4,10 +4,6 @@
 
 use clap::{Parser, Subcommand};
 
-#[cfg(unix)]
-use crate::constants::UNIX_TERMINAL_EMULATORS;
-use crate::error::{BridgeError, Result};
-
 // =============================================================================
 // CLI Definition
 // =============================================================================
@@ -87,70 +83,6 @@ pub enum Command {
     /// Internal: uninstall service with elevation (Windows only)
     #[command(hide = true)]
     UninstallService,
-}
-
-// =============================================================================
-// Terminal utilities
-// =============================================================================
-
-/// Check if the program is running in an interactive terminal
-pub fn is_running_in_terminal() -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        let handle = std::io::stdout().as_raw_handle();
-        // If we have a valid console handle, we're in a terminal
-        !handle.is_null()
-    }
-}
-
-/// Relaunch the program in a terminal emulator using freedesktop standards
-pub fn relaunch_in_terminal() -> Result<()> {
-    let exe = std::env::current_exe().map_err(|e| BridgeError::ServiceCommand { source: e })?;
-    let exe_str = exe.to_string_lossy().to_string();
-
-    #[cfg(unix)]
-    {
-        // Try xdg-terminal-exec first (freedesktop.org standard)
-        if try_spawn_terminal("xdg-terminal-exec", &[&exe_str, "--no-relaunch"]) {
-            return Ok(());
-        }
-
-        // Try x-terminal-emulator (Debian/Ubuntu alternative)
-        if try_spawn_terminal("x-terminal-emulator", &["-e", &exe_str, "--no-relaunch"]) {
-            return Ok(());
-        }
-
-        // Fallback: common terminals with standard -e flag
-        for term in UNIX_TERMINAL_EMULATORS {
-            if try_spawn_terminal(term, &["-e", &exe_str, "--no-relaunch"]) {
-                return Ok(());
-            }
-        }
-
-        return Err(BridgeError::PlatformNotSupported {
-            feature: "terminal emulator (install xdg-terminal-exec or run from terminal)",
-        });
-    }
-
-    #[cfg(windows)]
-    {
-        // On Windows, use cmd.exe to open a new console window
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", &exe_str, "--no-relaunch"])
-            .spawn()
-            .map_err(|e| BridgeError::ServiceCommand { source: e })?;
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
-fn try_spawn_terminal(cmd: &str, args: &[&str]) -> bool {
-    std::process::Command::new(cmd).args(args).spawn().is_ok()
 }
 
 // =============================================================================

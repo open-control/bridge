@@ -2,11 +2,11 @@
 //!
 //! Open, close, and save operations for the transport mode configuration popup.
 
+use super::mode_settings::ModeSettings;
 use super::App;
 use crate::config::{self, list_device_presets};
 use crate::constants::DEFAULT_VIRTUAL_PORT;
 use crate::logging::LogEntry;
-use crate::popup::ModeSettings;
 
 impl App {
     /// Get current mode settings popup (if open)

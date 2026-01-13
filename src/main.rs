@@ -24,13 +24,12 @@ mod error;
 mod input;
 mod logging;
 mod platform;
-mod popup;
 mod service;
 mod transport;
 mod ui;
 
 use clap::Parser;
-use cli::{is_running_in_terminal, relaunch_in_terminal, Cli, Command};
+use cli::{Cli, Command};
 use error::Result;
 
 fn main() -> Result<()> {
@@ -46,8 +45,8 @@ fn main() -> Result<()> {
     logging::init_tracing(cli.verbose);
 
     // Check if running in a terminal, if not (e.g., launched from desktop), relaunch in one
-    if !cli.no_relaunch && !cli.headless && !is_running_in_terminal() {
-        return relaunch_in_terminal();
+    if !cli.no_relaunch && !cli.headless && !platform::is_running_in_terminal() {
+        return platform::relaunch_in_terminal();
     }
 
     // Handle subcommands

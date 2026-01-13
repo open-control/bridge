@@ -6,8 +6,8 @@
 //! - UDP port (Bitwig/host)
 //! - Virtual port (controller)
 
+use crate::app::{ModeField, ModeSettings};
 use crate::config::TransportMode;
-use crate::popup::{ModeField, ModeSettings};
 use crate::ui::theme::{
     style_title, COLOR_BRIGHT, COLOR_RUNNING, COLOR_VALUE, STYLE_BRIGHT, STYLE_LABEL, STYLE_MUTED,
 };

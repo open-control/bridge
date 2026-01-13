@@ -1,7 +1,7 @@
 //! Log operations - clipboard and file export
 
-use crate::config;
 use crate::logging::LogStore;
+use crate::platform;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -60,7 +60,7 @@ pub fn export_logs(logs: &LogStore, max_export: usize) -> ExportResult {
             if let Err(e) = write!(file, "{}", text) {
                 return ExportResult::Error(format!("Export failed: {}", e));
             }
-            let opened = config::open_file(&path).is_ok();
+            let opened = platform::open_file(&path).is_ok();
             ExportResult::Success { line_count, opened }
         }
         Err(e) => ExportResult::Error(format!("Export failed: {}", e)),

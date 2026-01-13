@@ -64,6 +64,9 @@ pub const PAGE_SCROLL_LINES: usize = 10;
 /// Auto-scroll threshold (lines from bottom)
 pub const AUTO_SCROLL_THRESHOLD: usize = 5;
 
+/// Service status polling interval (frames, ~2 seconds at 60fps)
+pub const SERVICE_STATUS_POLL_INTERVAL: u32 = 120;
+
 /// Width threshold for wide/narrow layout switch
 pub const WIDE_THRESHOLD: u16 = 80;
 
@@ -86,21 +89,3 @@ pub const CHANNEL_CAPACITY: usize = 256;
 
 /// Consecutive zero-byte reads before assuming port disconnected
 pub const SERIAL_DISCONNECT_THRESHOLD: u32 = 10;
-
-// =============================================================================
-// Terminal emulators (Unix)
-// =============================================================================
-
-/// List of terminal emulators to try on Unix (in order of preference)
-#[cfg(unix)]
-pub const UNIX_TERMINAL_EMULATORS: &[&str] = &[
-    "gnome-terminal",
-    "konsole",
-    "xfce4-terminal",
-    "mate-terminal",
-    "tilix",
-    "terminator",
-    "alacritty",
-    "kitty",
-    "xterm",
-];

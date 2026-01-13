@@ -5,18 +5,19 @@
 
 mod commands;
 mod logs;
+mod mode_settings;
 mod operations;
 mod popup;
 pub mod state;
 
+pub use mode_settings::{ModeAction, ModeField, ModeSettings};
 pub use state::{AppState, ControllerTransport, ServiceState, Source};
 
-use crate::bridge_state::{Bridge, ServiceStatus};
+use crate::bridge_state::{Bridge, ServiceStatusCache};
 use crate::config::{self, Config, TransportMode};
 use crate::constants::{DEFAULT_VIRTUAL_PORT, SERVICE_SCM_SETTLE_DELAY_MS, STATUS_MESSAGE_TIMEOUT_SECS};
 use crate::input;
 use crate::logging::{FilterMode, LogEntry, LogFilter, LogStore};
-use crate::popup::{ModeAction, ModeSettings};
 use crossterm::event::KeyEvent;
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -28,7 +29,7 @@ pub struct App {
 
     // Bridge (state machine)
     pub(super) bridge: Bridge,
-    pub(super) service_status: ServiceStatus,
+    pub(super) service_status: ServiceStatusCache,
 
     // Logs
     pub(super) logs: LogStore,

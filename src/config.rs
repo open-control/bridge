@@ -7,7 +7,7 @@ use crate::constants::{DEFAULT_LOG_BROADCAST_PORT, DEFAULT_UDP_PORT};
 use crate::error::{BridgeError, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::warn;
 
 // =============================================================================
@@ -288,38 +288,7 @@ pub fn open_in_editor() -> Result<()> {
         save(&Config::default())?;
     }
 
-    open_file(&path)
-}
-
-/// Open a file with the system default application
-pub fn open_file(path: &Path) -> Result<()> {
-    let map_err = |e| BridgeError::ServiceCommand { source: e };
-
-    #[cfg(windows)]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &path.to_string_lossy()])
-            .spawn()
-            .map_err(map_err)?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .map_err(map_err)?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(path)
-            .spawn()
-            .map_err(map_err)?;
-    }
-
-    Ok(())
+    crate::platform::open_file(&path)
 }
 
 /// Detect serial port from config (explicit port or auto-detection via device preset)
