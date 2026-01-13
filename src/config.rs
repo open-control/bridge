@@ -120,7 +120,7 @@ pub struct BridgeConfig {
     /// Used when transport_mode is Auto or Virtual.
     pub virtual_port: Option<u16>,
 
-    /// UDP port for log broadcast from service to TUI (default: 9001)
+    /// UDP port for log broadcast from service to TUI (default: 9002)
     pub log_broadcast_port: u16,
 }
 

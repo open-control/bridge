@@ -53,6 +53,20 @@ impl Stats {
         self.rx_total.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
+    /// Get total transmitted bytes
+    #[inline]
+    #[allow(dead_code)] // Used in tests
+    pub fn tx_bytes(&self) -> u64 {
+        self.tx_total.load(Ordering::Relaxed)
+    }
+
+    /// Get total received bytes
+    #[inline]
+    #[allow(dead_code)] // Used in tests
+    pub fn rx_bytes(&self) -> u64 {
+        self.rx_total.load(Ordering::Relaxed)
+    }
+
     /// Update rate calculations and return (tx_kb_s, rx_kb_s)
     /// Call this periodically (e.g., every 500ms) from the UI thread
     pub fn update_rates(&self) -> (f64, f64) {

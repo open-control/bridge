@@ -296,4 +296,126 @@ mod tests {
         drop(ctrl_in_tx);
         let _ = session_handle.await;
     }
+
+    #[tokio::test]
+    async fn test_session_bidirectional_relay() {
+        // Test relay in both directions simultaneously
+        let (ctrl_in_tx, ctrl_in_rx) = mpsc::channel(16);
+        let (ctrl_out_tx, mut ctrl_out_rx) = mpsc::channel(16);
+        let (host_in_tx, host_in_rx) = mpsc::channel(16);
+        let (host_out_tx, mut host_out_rx) = mpsc::channel(16);
+
+        let controller = TransportChannels {
+            rx: ctrl_in_rx,
+            tx: ctrl_out_tx,
+        };
+        let host = TransportChannels {
+            rx: host_in_rx,
+            tx: host_out_tx,
+        };
+
+        let stats = Arc::new(Stats::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let session = BridgeSession::new(controller, host, RawCodec, stats.clone(), None);
+        let shutdown_clone = shutdown.clone();
+        let handle = tokio::spawn(async move { session.run(shutdown_clone).await });
+
+        // Send from controller (with message name prefix for protocol parsing)
+        ctrl_in_tx
+            .send(Bytes::from_static(b"\x04ping"))
+            .await
+            .unwrap();
+        // Send from host
+        host_in_tx
+            .send(Bytes::from_static(b"\x04pong"))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Verify controller -> host relay
+        let from_ctrl = host_out_rx.try_recv();
+        assert!(from_ctrl.is_ok(), "Expected data from controller to host");
+        assert_eq!(from_ctrl.unwrap().as_ref(), b"\x04ping");
+
+        // Verify host -> controller relay (RawCodec passes through)
+        let from_host = ctrl_out_rx.try_recv();
+        assert!(from_host.is_ok(), "Expected data from host to controller");
+
+        shutdown.store(true, Ordering::SeqCst);
+        drop(ctrl_in_tx);
+        drop(host_in_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_session_stats_tracking() {
+        let (ctrl_in_tx, ctrl_in_rx) = mpsc::channel(16);
+        let (ctrl_out_tx, _) = mpsc::channel(16);
+        let (_, host_in_rx) = mpsc::channel(16);
+        let (host_out_tx, _) = mpsc::channel(16);
+
+        let controller = TransportChannels {
+            rx: ctrl_in_rx,
+            tx: ctrl_out_tx,
+        };
+        let host = TransportChannels {
+            rx: host_in_rx,
+            tx: host_out_tx,
+        };
+
+        let stats = Arc::new(Stats::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let session = BridgeSession::new(controller, host, RawCodec, stats.clone(), None);
+        let shutdown_clone = shutdown.clone();
+        let handle = tokio::spawn(async move { session.run(shutdown_clone).await });
+
+        // Send data with message name prefix
+        ctrl_in_tx
+            .send(Bytes::from_static(b"\x05hello"))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Verify stats updated (rx = bytes received from controller)
+        assert!(stats.rx_bytes() > 0, "Expected rx stats to be updated");
+
+        shutdown.store(true, Ordering::SeqCst);
+        drop(ctrl_in_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_session_host_disconnect() {
+        let (ctrl_in_tx, ctrl_in_rx) = mpsc::channel(16);
+        let (ctrl_out_tx, _ctrl_out_rx) = mpsc::channel(16);
+        let (host_in_tx, host_in_rx) = mpsc::channel(16);
+        let (host_out_tx, _host_out_rx) = mpsc::channel(16);
+
+        let controller = TransportChannels {
+            rx: ctrl_in_rx,
+            tx: ctrl_out_tx,
+        };
+        let host = TransportChannels {
+            rx: host_in_rx,
+            tx: host_out_tx,
+        };
+
+        let stats = Arc::new(Stats::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let session = BridgeSession::new(controller, host, RawCodec, stats, None);
+
+        // Drop host sender to simulate disconnect
+        drop(host_in_tx);
+
+        // Run session - should exit due to host channel close
+        let result = session.run(shutdown).await;
+        assert!(result.is_ok());
+
+        // Cleanup
+        drop(ctrl_in_tx);
+    }
 }
