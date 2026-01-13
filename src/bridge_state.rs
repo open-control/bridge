@@ -5,10 +5,12 @@
 
 use crate::bridge::{self, stats::Stats, Handle, State as BridgeState};
 use crate::config::{self, BridgeConfig, Config};
+use crate::constants::SOCKET_RELEASE_DELAY_MS;
 use crate::logging::{receiver as log_receiver, Direction, LogEntry, LogKind, LogStore};
 use crate::service;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 /// Bridge runtime state - explicit state machine
@@ -23,6 +25,8 @@ pub enum Bridge {
         handle: Handle,
         log_rx: mpsc::Receiver<LogEntry>,
         serial_port: Option<String>,
+        /// Last time we checked for serial device (throttle in Auto mode)
+        last_serial_check: Instant,
     },
 
     /// Monitoring a Windows/Linux service via UDP
@@ -149,7 +153,7 @@ impl Bridge {
                 // 1. This method is sync and called from sync UI handlers
                 // 2. The 150ms delay is acceptable as it only happens on explicit user action
                 // 3. Converting to async would require propagating async through the entire call chain
-                std::thread::sleep(std::time::Duration::from_millis(150));
+                std::thread::sleep(std::time::Duration::from_millis(SOCKET_RELEASE_DELAY_MS));
                 logs.add(LogEntry::system("Monitoring stopped"));
                 Self::Stopped {
                     serial_port: config::detect_serial(cfg),
@@ -173,8 +177,10 @@ impl Bridge {
                 log_rx,
                 handle,
                 serial_port,
+                last_serial_check,
             } => {
                 use crate::config::TransportMode;
+                use std::time::Duration;
 
                 // Drain log channel
                 while let Ok(entry) = log_rx.try_recv() {
@@ -198,7 +204,12 @@ impl Bridge {
                 }
 
                 // In Auto mode: check if we should switch between serial/virtual
-                if cfg.bridge.transport_mode == TransportMode::Auto {
+                // Throttled to avoid USB enumeration every frame (60fps)
+                const SERIAL_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+                if cfg.bridge.transport_mode == TransportMode::Auto
+                    && last_serial_check.elapsed() >= SERIAL_CHECK_INTERVAL
+                {
+                    *last_serial_check = Instant::now();
                     let current_serial = config::detect_serial(cfg);
                     // Using virtual fallback, serial now detected → restart with serial
                     if let (None, Some(port)) = (serial_port.as_ref(), &current_serial) {
@@ -235,7 +246,7 @@ impl Bridge {
                     // Signal receiver thread to stop and release socket
                     // (See comment in stop() for why this is intentionally blocking)
                     shutdown.store(true, Ordering::SeqCst);
-                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    std::thread::sleep(std::time::Duration::from_millis(SOCKET_RELEASE_DELAY_MS));
                     *self = Self::Stopped {
                         serial_port: config::detect_serial(cfg),
                     };
@@ -264,10 +275,8 @@ impl Bridge {
     // Service control (delegates to service module)
     // =========================================================================
 
-    /// Install service (may require elevation)
+    /// Install service (handles elevation internally)
     pub fn install_service(cfg: &Config, logs: &mut LogStore) {
-        use crate::platform;
-
         // If service already installed, just start it
         if service::is_installed().unwrap_or(false) {
             logs.add(LogEntry::system("Service already installed, starting..."));
@@ -280,48 +289,21 @@ impl Bridge {
 
         logs.add(LogEntry::system("Installing service..."));
 
-        // Try direct install first (works if admin or UAC disabled)
+        // service::install() handles elevation internally
         match service::install(None, cfg.bridge.udp_port) {
-            Ok(_) => {
-                logs.add(LogEntry::system("Service installed"));
-                return;
-            }
-            Err(_) => {
-                // Any error - try with elevation
-            }
-        }
-
-        // Need elevation - launch elevated process
-        logs.add(LogEntry::system("Requesting elevation..."));
-        let args = format!("install-service --udp-port {}", cfg.bridge.udp_port);
-        match platform::run_elevated_action(&args) {
-            Ok(_) => logs.add(LogEntry::system("Accept UAC prompt to install")),
-            Err(e) => logs.add(LogEntry::system(format!("Elevation failed: {}", e))),
+            Ok(_) => logs.add(LogEntry::system("Service installed")),
+            Err(e) => logs.add(LogEntry::system(format!("Install failed: {}", e))),
         }
     }
 
-    /// Uninstall service (may require elevation)
+    /// Uninstall service (handles elevation internally)
     pub fn uninstall_service(logs: &mut LogStore) {
-        use crate::platform;
-
         logs.add(LogEntry::system("Uninstalling service..."));
 
-        // Try direct uninstall first
+        // service::uninstall() handles elevation internally
         match service::uninstall() {
-            Ok(_) => {
-                logs.add(LogEntry::system("Service uninstalled"));
-                return;
-            }
-            Err(_) => {
-                // Any error - try with elevation
-            }
-        }
-
-        // Need elevation
-        logs.add(LogEntry::system("Requesting elevation..."));
-        match platform::run_elevated_action("uninstall-service") {
-            Ok(_) => logs.add(LogEntry::system("Accept UAC prompt to uninstall")),
-            Err(e) => logs.add(LogEntry::system(format!("Elevation failed: {}", e))),
+            Ok(_) => logs.add(LogEntry::system("Service uninstalled")),
+            Err(e) => logs.add(LogEntry::system(format!("Uninstall failed: {}", e))),
         }
     }
 
@@ -393,6 +375,7 @@ impl Bridge {
                 handle,
                 log_rx,
                 serial_port,
+                last_serial_check: Instant::now(),
             },
             Err(e) => {
                 logs.add(LogEntry::system(format!("Failed to start: {}", e)));

@@ -5,6 +5,7 @@
 
 mod commands;
 mod logs;
+mod operations;
 mod popup;
 pub mod state;
 
@@ -12,7 +13,7 @@ pub use state::{AppState, ControllerTransport, ServiceState, Source};
 
 use crate::bridge_state::{Bridge, ServiceStatus};
 use crate::config::{self, Config, TransportMode};
-use crate::constants::{DEFAULT_VIRTUAL_PORT, STATUS_MESSAGE_TIMEOUT_SECS};
+use crate::constants::{DEFAULT_VIRTUAL_PORT, SERVICE_SCM_SETTLE_DELAY_MS, STATUS_MESSAGE_TIMEOUT_SECS};
 use crate::input;
 use crate::logging::{FilterMode, LogEntry, LogFilter, LogStore};
 use crate::popup::{ModeAction, ModeSettings};
@@ -274,7 +275,7 @@ impl App {
             // Wait for service to stop before refreshing status.
             // Intentionally blocking - this is a sync method called from UI key handler,
             // and 500ms delay only happens on explicit user action (pressing 'S').
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(std::time::Duration::from_millis(SERVICE_SCM_SETTLE_DELAY_MS));
             self.service_status.refresh();
             self.service_stopped_for_local = true;
 
@@ -292,7 +293,7 @@ impl App {
             self.bridge.stop(&self.config, &mut self.logs);
             self.logs.add(LogEntry::system("Restarting service..."));
             let _ = crate::service::start();
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(std::time::Duration::from_millis(SERVICE_SCM_SETTLE_DELAY_MS));
             self.service_status.refresh();
             self.service_stopped_for_local = false;
             return;
@@ -359,7 +360,7 @@ impl App {
         self.service_stopped_for_local = false;
 
         // Refresh status to detect if service started
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(SERVICE_SCM_SETTLE_DELAY_MS));
         self.service_status.refresh();
     }
 

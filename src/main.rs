@@ -23,7 +23,6 @@ mod constants;
 mod error;
 mod input;
 mod logging;
-mod operations;
 mod platform;
 mod popup;
 mod service;
@@ -86,37 +85,14 @@ async fn run_tui() -> Result<()> {
 // Service installation (user-facing commands)
 // =============================================================================
 
-/// Install service - requests elevation if needed
+/// Install service (handles elevation internally on Windows)
 fn run_install_service(port: Option<&str>, udp_port: u16) -> Result<()> {
-    #[cfg(windows)]
-    {
-        // Build args for elevated process
-        let mut args = format!("install-service --udp-port {}", udp_port);
-        if let Some(p) = port {
-            args = format!("install-service --port {} --udp-port {}", p, udp_port);
-        }
-        // Request elevation and re-run with internal command (visible window for CLI)
-        platform::run_elevated_action(&args)
-    }
-    #[cfg(unix)]
-    {
-        // On Unix, just install directly (systemd)
-        let _ = (port, udp_port);
-        service::install()
-    }
+    service::install(port, udp_port)
 }
 
-/// Uninstall service - requests elevation if needed
+/// Uninstall service (handles elevation internally on Windows)
 fn run_uninstall_service() -> Result<()> {
-    #[cfg(windows)]
-    {
-        // Request elevation (visible window for CLI)
-        platform::run_elevated_action("uninstall-service")
-    }
-    #[cfg(unix)]
-    {
-        service::uninstall()
-    }
+    service::uninstall()
 }
 
 // =============================================================================
@@ -126,14 +102,11 @@ fn run_uninstall_service() -> Result<()> {
 /// Install service with elevation (called from elevated process)
 #[cfg(windows)]
 fn run_install_service_elevated(port: Option<&str>, udp_port: u16) -> Result<()> {
-    // Install service
+    // service::install() handles ACL configuration when elevated
     service::install(port, udp_port)?;
 
-    // Configure ACL to allow current user to control the service
-    let _ = service::configure_user_permissions();
-
-    // Wait briefly for service to start
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Brief delay for service to start before elevated process exits
+    std::thread::sleep(std::time::Duration::from_millis(constants::SERVICE_SCM_SETTLE_DELAY_MS));
 
     Ok(())
 }

@@ -65,6 +65,18 @@ pub fn run_elevated_action(action: &str) -> Result<()> {
     }
 }
 
+/// Check if current process is elevated (admin on Windows)
+///
+/// - Windows: Checks TOKEN_ELEVATION
+/// - Other platforms: Returns false (no equivalent concept for systemd user services)
+pub fn is_elevated() -> bool {
+    #[cfg(windows)]
+    { windows::is_elevated() }
+
+    #[cfg(not(windows))]
+    { false }
+}
+
 // =============================================================================
 // Serial port configuration
 // =============================================================================
