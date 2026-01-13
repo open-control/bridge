@@ -58,16 +58,15 @@ pub enum Command {
     /// Uninstall system service (requires elevation on Windows)
     Uninstall,
 
-    /// Run as Windows service (internal, called by SCM)
+    /// Run as system service (internal, called by service manager)
     ///
-    /// IMPORTANT: This must be a subcommand (not a flag like `--service`) because
-    /// clap parses the command line. The service binary path in SCM is set to:
+    /// Windows: Called by SCM. The service binary path is set to:
     ///   `"path\to\oc-bridge.exe" service --port COM3 --udp-port 9000`
     ///
+    /// Linux: Not used (systemd launches the process directly).
+    ///
     /// The arguments here MUST match those passed in the service binary path
-    /// (see `install()` in service/windows.rs), otherwise clap parsing fails
-    /// silently and `run_as_service()` is never called.
-    #[cfg(windows)]
+    /// (see `install()` in service/windows.rs), otherwise clap parsing fails.
     #[command(hide = true)]
     Service {
         #[arg(long)]
@@ -76,9 +75,8 @@ pub enum Command {
         udp_port: u16,
     },
 
-    /// Internal: install service with elevation
+    /// Internal: install service with elevation (Windows only)
     #[command(hide = true)]
-    #[cfg(windows)]
     InstallService {
         #[arg(long)]
         port: Option<String>,
@@ -86,9 +84,8 @@ pub enum Command {
         udp_port: u16,
     },
 
-    /// Internal: uninstall service with elevation
+    /// Internal: uninstall service with elevation (Windows only)
     #[command(hide = true)]
-    #[cfg(windows)]
     UninstallService,
 }
 
