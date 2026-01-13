@@ -39,8 +39,8 @@ fn main() -> Result<()> {
 
     // Handle Windows service mode first (internal, called by SCM)
     #[cfg(windows)]
-    if let Some(Command::Service) = &cli.command {
-        return service::run_as_service();
+    if let Some(Command::Service { port, udp_port }) = cli.command {
+        return service::run_as_service(port.as_deref(), udp_port);
     }
 
     // Initialize tracing for internal debug output
@@ -66,7 +66,7 @@ fn main() -> Result<()> {
         Some(Command::UninstallService) => run_uninstall_service_elevated(),
 
         #[cfg(windows)]
-        Some(Command::Service) => unreachable!(), // Handled above
+        Some(Command::Service { .. }) => unreachable!(), // Handled above
 
         // Default: run TUI
         None => {

@@ -3,9 +3,7 @@
 //! - `windows-services` for service runtime (responding to SCM commands)
 //! - `windows` crate for SCM management (install, uninstall, start, stop)
 
-use crate::cli::Cli;
 use crate::constants::CHANNEL_CAPACITY;
-use clap::Parser;
 use crate::error::{BridgeError, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -172,7 +170,7 @@ pub fn install(serial_port: Option<&str>, udp_port: u16) -> Result<()> {
         std::env::current_exe().map_err(|e| BridgeError::ServiceCommand { source: e })?;
 
     // Build command line with arguments
-    let mut cmd = format!("\"{}\" --service", exe_path.display());
+    let mut cmd = format!("\"{}\" service", exe_path.display());
     if let Some(port) = serial_port {
         cmd.push_str(&format!(" --port {}", port));
     }
@@ -333,34 +331,55 @@ pub fn stop() -> Result<()> {
 // =============================================================================
 // Service Runtime (using windows-services crate)
 // =============================================================================
+//
+// This uses the official Microsoft `windows-services` crate (not to be confused
+// with the community `windows-service` crate by Mullvad).
+//
+// Key points about windows-services:
+// - `Service::run()` blocks and handles SCM communication automatically
+// - The closure receives commands from SCM (Stop, Pause, etc.)
+// - `can_fallback()` provides a graceful message when run outside SCM context
+// - Bridge logic runs in a separate thread to not block the SCM handler
+//
+// IMPORTANT: This is invoked via clap subcommand `service` (not `--service` flag).
+// The Command::Service variant must define the same arguments (port, udp_port)
+// that are passed in the service binary path, otherwise clap parsing fails silently.
 
 /// Entry point when running as a Windows service
-pub fn run_as_service() -> Result<()> {
+///
+/// Called by the Service Control Manager (SCM) when the service starts.
+/// Must respond to SCM within ~30 seconds or the service will be marked as failed.
+pub fn run_as_service(port: Option<&str>, udp_port: u16) -> Result<()> {
     // Initialize tracing for service mode
     crate::logging::init_tracing(false);
 
-    // Parse command line arguments for port config using clap
-    let cli = Cli::try_parse().unwrap_or_default();
-    let port = cli.port;
-    let udp_port = cli.udp_port.unwrap_or(9000);
+    let port = port.map(|s| s.to_string());
 
-    // Create shutdown flag
+    // Create shutdown flag shared between SCM handler and bridge
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_for_handler = shutdown.clone();
 
-    // Spawn bridge logic in a separate thread
+    // Spawn bridge logic in a separate thread BEFORE calling run()
+    // This ensures the SCM handler can respond immediately
     let bridge_handle = std::thread::spawn(move || {
         run_bridge_logic(port, udp_port, shutdown);
     });
 
     // Run the service control handler (blocks until service stops)
+    // can_fallback() shows a helpful message if run manually (not via SCM)
     let handler_result = windows_services::Service::new()
         .can_stop()
+        .can_fallback(|_| {
+            eprintln!("This command is for internal use by the Service Control Manager.");
+            eprintln!("To install as a service, use: oc-bridge install");
+            eprintln!("To run interactively, use: oc-bridge");
+        })
         .run(move |_service, command| {
             if let windows_services::Command::Stop = command {
                 shutdown_for_handler.store(true, Ordering::SeqCst);
             }
         });
+
     handler_result.map_err(|e| BridgeError::ServiceCommand {
         source: std::io::Error::other(e),
     })?;
@@ -544,7 +563,7 @@ mod tests {
         assert!(sddl.contains(";;;SU)"), "Missing Service Users trustee");
 
         // Interactive users must have START (RP) and STOP (WP) rights
-        let iu_section = sddl.split(";;;IU)").next().unwrap();
+        let iu_section = sddl.split(";;;IU)").next().expect("IU section must exist");
         assert!(iu_section.contains("RP"), "Interactive users must have START (RP) right");
         assert!(iu_section.contains("WP"), "Interactive users must have STOP (WP) right");
     }

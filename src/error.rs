@@ -78,7 +78,7 @@ impl fmt::Display for BridgeError {
             Self::ServicePermission { action } => {
                 write!(f, "Permission denied for: {}", action)
             }
-            Self::ServiceCommand { .. } => write!(f, "Service command failed"),
+            Self::ServiceCommand { source } => write!(f, "Service command failed: {}", source),
             Self::NoDeviceFound => write!(f, "No device found"),
             Self::MultipleDevicesFound { count } => {
                 write!(f, "Multiple devices found ({})", count)

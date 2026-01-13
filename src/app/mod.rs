@@ -36,6 +36,9 @@ pub struct App {
     controller_transport: ControllerTransport,
     log_connected: bool,
     last_log_time: Option<Instant>,
+    /// True if we stopped the service to run local bridge.
+    /// Used to restart service when local stops or TUI quits.
+    service_stopped_for_local: bool,
 
     // UI state
     status_message: Option<(String, Instant)>,
@@ -48,13 +51,12 @@ impl App {
         let cfg = config::load();
         let max_entries = cfg.logs.max_entries;
 
-        let (mut bridge, service_status) = Bridge::new(&cfg);
-        let mut logs = LogStore::new(max_entries);
+        let (bridge, service_status) = Bridge::new(&cfg);
+        let logs = LogStore::new(max_entries);
 
-        // Auto-start local bridge if service is not running
-        if !service_status.running {
-            bridge.start(&cfg, &mut logs);
-        }
+        // No auto-start: preserve current state.
+        // - If service is running → Bridge::new() already started monitoring
+        // - If nothing running → stay Stopped, wait for user action (S or I)
 
         let controller_transport = Self::determine_transport(&cfg, &bridge);
 
@@ -66,6 +68,7 @@ impl App {
             controller_transport,
             log_connected: false,
             last_log_time: None,
+            service_stopped_for_local: false,
             status_message: None,
             should_quit: false,
             mode_popup: None,
@@ -258,8 +261,13 @@ impl App {
     // =========================================================================
 
     /// Toggle local bridge (S key)
+    ///
+    /// Behavior:
+    /// - If service is running → stop it temporarily, start local, set flag
+    /// - If local is running AND we stopped service for it → stop local, restart service, clear flag
+    /// - Otherwise → simple toggle (start/stop local)
     pub fn toggle_local_bridge(&mut self) {
-        // If service is running, stop it first
+        // Case 1: Service is running → stop it to start local
         if self.service_status.running {
             self.logs.add(LogEntry::system("Stopping service to start local bridge..."));
             let _ = crate::service::stop();
@@ -268,9 +276,29 @@ impl App {
             // and 500ms delay only happens on explicit user action (pressing 'S').
             std::thread::sleep(std::time::Duration::from_millis(500));
             self.service_status.refresh();
+            self.service_stopped_for_local = true;
+
+            // Stop monitoring (if any) and start local
+            self.bridge.stop(&self.config, &mut self.logs);
+            self.bridge.start(&self.config, &mut self.logs);
+            return;
         }
 
-        // Toggle local bridge
+        // Case 2: Local is running AND we had stopped service → stop local, restart service
+        if matches!(self.bridge, Bridge::Running { .. })
+            && self.service_stopped_for_local
+            && self.service_status.installed
+        {
+            self.bridge.stop(&self.config, &mut self.logs);
+            self.logs.add(LogEntry::system("Restarting service..."));
+            let _ = crate::service::start();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            self.service_status.refresh();
+            self.service_stopped_for_local = false;
+            return;
+        }
+
+        // Case 3: Simple toggle (no service involved)
         match &self.bridge {
             Bridge::Running { .. } => {
                 self.bridge.stop(&self.config, &mut self.logs);
@@ -320,7 +348,19 @@ impl App {
     }
 
     pub fn install_service(&mut self) {
+        // Stop local bridge before installing service (mutually exclusive)
+        if matches!(self.bridge, Bridge::Running { .. }) {
+            self.bridge.stop(&self.config, &mut self.logs);
+        }
+
         Bridge::install_service(&self.config, &mut self.logs);
+
+        // Clear flag since service is now managing things
+        self.service_stopped_for_local = false;
+
+        // Refresh status to detect if service started
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        self.service_status.refresh();
     }
 
     pub fn uninstall_service(&mut self) {
@@ -333,6 +373,13 @@ impl App {
 
     pub fn quit(&mut self) {
         self.bridge.stop(&self.config, &mut self.logs);
+
+        // Restart service if we had stopped it to run local
+        if self.service_stopped_for_local && self.service_status.installed {
+            self.logs.add(LogEntry::system("Restarting service..."));
+            let _ = crate::service::start();
+        }
+
         self.should_quit = true;
     }
 

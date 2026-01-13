@@ -37,19 +37,6 @@ use bytes::Bytes;
 /// ```
 pub struct RawCodec;
 
-impl RawCodec {
-    /// Create a new RawCodec
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for RawCodec {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Codec for RawCodec {
     fn decode(&mut self, data: &[u8], mut on_frame: impl FnMut(Frame)) {
         if !data.is_empty() {

@@ -184,16 +184,6 @@ impl ModeSettings {
         self.input_buffer.clear();
     }
 
-    /// Get the transport mode
-    pub fn get_transport_mode(&self) -> TransportMode {
-        self.transport_mode
-    }
-
-    /// Get the virtual port value
-    pub fn get_virtual_port(&self) -> u16 {
-        self.virtual_port
-    }
-
     /// Handle keyboard input, returns action for App to execute
     pub fn handle_key(&mut self, key: KeyCode) -> ModeAction {
         if self.editing {
