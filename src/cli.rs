@@ -2,7 +2,22 @@
 //!
 //! Provides structured argument parsing with automatic help generation.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+// =============================================================================
+// Controller Transport CLI Argument
+// =============================================================================
+
+/// Controller transport type for CLI argument
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum ControllerArg {
+    /// WebSocket server (for browser/WASM apps)
+    #[value(alias = "ws")]
+    Websocket,
+    /// UDP socket (for native desktop apps)
+    #[default]
+    Udp,
+}
 
 // =============================================================================
 // CLI Definition
@@ -21,9 +36,26 @@ pub struct Cli {
     #[arg(long)]
     pub no_relaunch: bool,
 
-    /// Run in headless mode (no TUI, for service/daemon)
+    /// Run in headless mode (no TUI, logs to stdout)
+    ///
+    /// Use with --controller to specify transport type.
+    /// Example: oc-bridge --headless --controller websocket
     #[arg(long)]
     pub headless: bool,
+
+    /// Controller transport type (requires --headless)
+    ///
+    /// - websocket (or ws): Listen on WebSocket port for browser/WASM apps
+    /// - udp: Listen on UDP port for native desktop apps
+    #[arg(long, value_enum, requires = "headless")]
+    pub controller: Option<ControllerArg>,
+
+    /// Controller port to listen on (requires --headless)
+    ///
+    /// Overrides default port for the controller transport.
+    /// Default: 8001 (WebSocket), 9001 (UDP)
+    #[arg(long, requires = "headless")]
+    pub controller_port: Option<u16>,
 
     /// Serial port to use (overrides config)
     #[arg(long, value_name = "PORT")]
@@ -98,7 +130,38 @@ mod tests {
         let cli = Cli::parse_from(["oc-bridge"]);
         assert!(!cli.verbose);
         assert!(!cli.no_relaunch);
+        assert!(!cli.headless);
+        assert!(cli.controller.is_none());
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn test_cli_parse_headless_websocket() {
+        let cli = Cli::parse_from(["oc-bridge", "--headless", "--controller", "websocket"]);
+        assert!(cli.headless);
+        assert_eq!(cli.controller, Some(ControllerArg::Websocket));
+    }
+
+    #[test]
+    fn test_cli_parse_headless_ws_alias() {
+        let cli = Cli::parse_from(["oc-bridge", "--headless", "--controller", "ws"]);
+        assert!(cli.headless);
+        assert_eq!(cli.controller, Some(ControllerArg::Websocket));
+    }
+
+    #[test]
+    fn test_cli_parse_headless_udp() {
+        let cli = Cli::parse_from(["oc-bridge", "--headless", "--controller", "udp"]);
+        assert!(cli.headless);
+        assert_eq!(cli.controller, Some(ControllerArg::Udp));
+    }
+
+    #[test]
+    fn test_cli_parse_headless_with_port() {
+        let cli = Cli::parse_from(["oc-bridge", "--headless", "--controller", "ws", "--controller-port", "8002"]);
+        assert!(cli.headless);
+        assert_eq!(cli.controller, Some(ControllerArg::Websocket));
+        assert_eq!(cli.controller_port, Some(8002));
     }
 
     #[test]

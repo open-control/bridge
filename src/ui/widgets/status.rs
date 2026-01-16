@@ -1,10 +1,10 @@
 //! Status widget - displays bridge status with responsive layout
 //!
-//! Shows source (Local/Service), mode, service state, and transport info.
+//! Shows source (Local/Service), transport config, and connection state.
 
-use crate::app::state::{ControllerTransport, ServiceState, Source};
+use crate::app::state::{ControllerTransportState, HostTransportState, ServiceState, Source};
 use crate::app::AppState;
-use crate::config::TransportMode;
+use crate::config::{ControllerTransport, HostTransport};
 use crate::constants::WIDE_THRESHOLD;
 use crate::ui::theme::{
     style_title, COLOR_LOG_RX, COLOR_LOG_TX, COLOR_MUTED, COLOR_RUNNING,
@@ -100,7 +100,7 @@ impl StatusWidget<'_> {
         self.render_host_box(chunks[2], buf);
     }
 
-    /// Render header line: Source | Mode | Service status
+    /// Render header line: Source | Controller Config | Host Config | Service status
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
         // Source
         let source_text = match self.state.source {
@@ -108,18 +108,25 @@ impl StatusWidget<'_> {
             Source::Service => "Service",
         };
 
-        // Mode
-        let mode_text = match self.state.transport_mode {
-            TransportMode::Auto => "Auto",
-            TransportMode::Serial => "Serial",
-            TransportMode::Virtual => "Virtual",
+        // Controller transport config
+        let ctrl_text = match self.state.controller_transport_config {
+            ControllerTransport::Serial => "Serial",
+            ControllerTransport::Udp => "UDP",
+            ControllerTransport::WebSocket => "WS",
+        };
+
+        // Host transport config
+        let host_text = match self.state.host_transport_config {
+            HostTransport::Udp => "UDP",
+            HostTransport::WebSocket => "WS",
+            HostTransport::Both => "UDP+WS",
         };
 
         // Build service status section (right side)
         let service_spans = self.build_service_spans();
 
         // Calculate spacing for right-alignment
-        let left_content = format!("  Source: {}    Mode: {}", source_text, mode_text);
+        let left_content = format!("  Source: {}  Ctrl: {}  Host: {}", source_text, ctrl_text, host_text);
         let right_content_len = service_spans.iter().map(|s| s.content.len()).sum::<usize>();
         let padding = area.width as usize - left_content.len() - right_content_len - 2;
         let padding_str = " ".repeat(padding.max(1));
@@ -127,8 +134,10 @@ impl StatusWidget<'_> {
         let mut spans = vec![
             Span::styled("  Source: ", STYLE_LABEL),
             Span::styled(source_text, STYLE_VALUE),
-            Span::styled("    Mode: ", STYLE_LABEL),
-            Span::styled(mode_text, STYLE_VALUE),
+            Span::styled("  Ctrl: ", STYLE_LABEL),
+            Span::styled(ctrl_text, STYLE_VALUE),
+            Span::styled("  Host: ", STYLE_LABEL),
+            Span::styled(host_text, STYLE_VALUE),
             Span::raw(padding_str),
         ];
         spans.extend(service_spans);
@@ -183,17 +192,20 @@ impl StatusWidget<'_> {
         let rx_rate = self.state.rx_rate;
 
         // Transport info with indicator
-        let (indicator, indicator_color, transport_text) = match &self.state.controller_transport {
-            ControllerTransport::Serial { port } => {
+        let (indicator, indicator_color, transport_text) = match &self.state.controller_state {
+            ControllerTransportState::Serial { port } => {
                 (SYMBOL_CONNECTED, COLOR_RUNNING, format!("Serial:{}", port))
             }
-            ControllerTransport::Virtual { port } => {
+            ControllerTransportState::Udp { port } => {
                 (SYMBOL_CONNECTED, COLOR_RUNNING, format!("UDP:{}", port))
             }
-            ControllerTransport::Waiting => {
+            ControllerTransportState::WebSocket { port } => {
+                (SYMBOL_CONNECTED, COLOR_RUNNING, format!("WS:{}", port))
+            }
+            ControllerTransportState::Waiting => {
                 (SYMBOL_DISCONNECTED, COLOR_MUTED, "Waiting...".to_string())
             }
-            ControllerTransport::Disconnected => {
+            ControllerTransportState::Disconnected => {
                 (SYMBOL_DISCONNECTED, COLOR_STOPPED, "Disconnected".to_string())
             }
         };
@@ -223,6 +235,19 @@ impl StatusWidget<'_> {
     fn render_host_box(&self, area: Rect, buf: &mut Buffer) {
         let tx_rate = self.state.tx_rate;
 
+        // Transport info based on host state
+        let transport_text = match &self.state.host_state {
+            HostTransportState::Udp { port } => format!("UDP:{}", port),
+            HostTransportState::WebSocket { port } => format!("WS:{}", port),
+            HostTransportState::Both { udp_port, ws_port } => {
+                format!("UDP:{} + WS:{}", udp_port, ws_port)
+            }
+        };
+
+        // Host is always active when bridge is running
+        let indicator = SYMBOL_CONNECTED;
+        let indicator_color = COLOR_RUNNING;
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(STYLE_DIM)
@@ -233,12 +258,9 @@ impl StatusWidget<'_> {
 
         let line = Line::from(vec![
             Span::raw(" "),
-            Span::styled(SYMBOL_CONNECTED, Style::new().fg(COLOR_RUNNING)),
+            Span::styled(indicator, Style::new().fg(indicator_color)),
             Span::raw(" "),
-            Span::styled(
-                format!("UDP:{}", self.state.udp_port),
-                Style::new().fg(COLOR_RUNNING),
-            ),
+            Span::styled(transport_text, Style::new().fg(indicator_color)),
             Span::styled("  ", STYLE_LABEL),
             Span::styled(format!("{} ", SYMBOL_OUT), Style::new().fg(COLOR_LOG_TX)),
             Span::styled(format!("{:.1} KB/s", tx_rate), STYLE_VALUE),

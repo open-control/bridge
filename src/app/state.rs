@@ -2,7 +2,7 @@
 //!
 //! Contains the state snapshot used for rendering and the active protocol enum.
 
-use crate::config::TransportMode;
+use crate::config::{ControllerTransport as ControllerTransportConfig, HostTransport as HostTransportConfig};
 
 /// Source of bridge execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,17 +24,34 @@ pub enum ServiceState {
     Running,
 }
 
-/// Controller transport state at runtime
+/// Controller transport runtime state
+///
+/// Represents the current connection state of the controller transport.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ControllerTransport {
+pub enum ControllerTransportState {
     /// Connected via serial port
     Serial { port: String },
-    /// Connected via UDP (virtual mode)
-    Virtual { port: u16 },
-    /// Waiting for device (reconnecting)
+    /// Connected via UDP
+    Udp { port: u16 },
+    /// Connected via WebSocket
+    WebSocket { port: u16 },
+    /// Waiting for connection (e.g., serial device not plugged in)
     Waiting,
     /// Disconnected (bridge stopped)
     Disconnected,
+}
+
+/// Host transport runtime state
+///
+/// Represents the current state of host transport(s).
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostTransportState {
+    /// UDP only
+    Udp { port: u16 },
+    /// WebSocket only
+    WebSocket { port: u16 },
+    /// Both UDP and WebSocket
+    Both { udp_port: u16, ws_port: u16 },
 }
 
 /// Application state snapshot for rendering (zero-copy)
@@ -45,9 +62,16 @@ pub enum ControllerTransport {
 pub struct AppState<'a> {
     // Runtime state
     pub source: Source,
-    pub transport_mode: TransportMode,
-    pub controller_transport: &'a ControllerTransport,
-    pub udp_port: u16,
+    
+    // Transport configuration
+    pub controller_transport_config: ControllerTransportConfig,
+    pub host_transport_config: HostTransportConfig,
+    
+    // Transport runtime state
+    pub controller_state: &'a ControllerTransportState,
+    pub host_state: HostTransportState,
+    
+    // Traffic stats
     pub rx_rate: f64,
     pub tx_rate: f64,
 

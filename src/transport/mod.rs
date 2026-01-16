@@ -17,9 +17,11 @@
 
 pub mod serial;
 pub mod udp;
+pub mod websocket;
 
 pub use serial::SerialTransport;
 pub use udp::UdpTransport;
+pub use websocket::WebSocketTransport;
 
 use bytes::Bytes;
 use std::sync::atomic::AtomicBool;

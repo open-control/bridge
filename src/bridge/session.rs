@@ -20,7 +20,6 @@ use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::warn;
 
 /// Bridge session between controller and host transports
 ///
@@ -134,24 +133,18 @@ impl<C: Codec> BridgeSession<C> {
                     // Update stats (bytes received from controller)
                     self.stats.add_rx(payload.len());
 
-                    // Log protocol message
+                    // Log protocol message (silently drop if channel full)
                     if let Some(ref tx) = self.log_tx {
-                        if tx.try_send(LogEntry::protocol_in(&name, payload.len())).is_err() {
-                            warn!("Log channel full: protocol_in");
-                        }
+                        let _ = tx.try_send(LogEntry::protocol_in(&name, payload.len()));
                     }
 
                     // Send raw payload to host (no encoding needed for UDP)
-                    if self.host.tx.try_send(payload).is_err() {
-                        warn!("Host channel full: dropping message");
-                    }
+                    let _ = self.host.tx.try_send(payload);
                 }
                 Frame::DebugLog { level, message } => {
-                    // Forward debug logs from controller firmware
+                    // Forward debug logs from controller firmware (silently drop if channel full)
                     if let Some(ref tx) = self.log_tx {
-                        if tx.try_send(LogEntry::debug_log(level, message)).is_err() {
-                            warn!("Log channel full: debug_log");
-                        }
+                        let _ = tx.try_send(LogEntry::debug_log(level, message));
                     }
                 }
             }
@@ -175,10 +168,8 @@ impl<C: Codec> BridgeSession<C> {
         let mut encoded = Vec::with_capacity(data.len() + 16);
         self.controller_codec.encode(&data, &mut encoded);
 
-        // Send to controller
-        if self.controller.tx.try_send(Bytes::from(encoded)).is_err() {
-            warn!("Controller channel full: dropping message");
-        }
+        // Send to controller (silently drop if channel full)
+        let _ = self.controller.tx.try_send(Bytes::from(encoded));
     }
 }
 

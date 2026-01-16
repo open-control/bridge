@@ -427,7 +427,7 @@ fn run_bridge_logic(port: Option<String>, udp_port: u16, shutdown: Arc<AtomicBoo
         config.serial_port = p;
     }
     if udp_port != 9000 {
-        config.udp_port = udp_port;
+        config.host_udp_port = udp_port;
     }
 
     // Create log broadcaster for service → TUI communication

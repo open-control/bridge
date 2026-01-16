@@ -3,17 +3,32 @@
 //! Centralized constants to avoid duplication and ensure consistency.
 
 // =============================================================================
-// Network
+// Network - Controller Side (source of MIDI messages)
 // =============================================================================
 
-/// Default UDP port for Bitwig/host communication
-pub const DEFAULT_UDP_PORT: u16 = 9000;
+/// Default UDP port for controller (desktop app simulation)
+pub const DEFAULT_CONTROLLER_UDP_PORT: u16 = 9001;
 
-/// Default UDP port for virtual controller mode
-pub const DEFAULT_VIRTUAL_PORT: u16 = 9001;
+/// Default WebSocket port for controller (browser app simulation)
+pub const DEFAULT_CONTROLLER_WEBSOCKET_PORT: u16 = 8001;
+
+// =============================================================================
+// Network - Host Side (destination: Bitwig, DAW)
+// =============================================================================
+
+/// Default UDP port for host communication (Bitwig extension native)
+/// Must match Protocol.java DEFAULT_BRIDGE_PORT in Bitwig extension
+pub const DEFAULT_HOST_UDP_PORT: u16 = 9000;
+
+/// Default WebSocket port for host communication (Bitwig extension browser)
+pub const DEFAULT_HOST_WEBSOCKET_PORT: u16 = 8000;
+
+// =============================================================================
+// Network - Logs
+// =============================================================================
 
 /// Default UDP port for log broadcasting (service -> TUI)
-pub const DEFAULT_LOG_BROADCAST_PORT: u16 = 9002;
+pub const DEFAULT_LOG_BROADCAST_PORT: u16 = 9999;
 
 // =============================================================================
 // Timing - Service Operations
@@ -66,9 +81,6 @@ pub const AUTO_SCROLL_THRESHOLD: usize = 5;
 
 /// Service status polling interval (frames, ~2 seconds at 60fps)
 pub const SERVICE_STATUS_POLL_INTERVAL: u32 = 120;
-
-/// Interval for serial device check in Auto mode (seconds)
-pub const SERIAL_CHECK_INTERVAL_SECS: u64 = 2;
 
 /// Timeout before considering log connection lost (seconds)
 pub const LOG_CONNECTION_TIMEOUT_SECS: u64 = 5;
