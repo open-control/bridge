@@ -4,13 +4,12 @@
 //! Impossible to have inconsistent state (e.g., handle without log_rx).
 
 use crate::bridge::{self, stats::Stats, Handle, State as BridgeState};
-use crate::config::{self, BridgeConfig, Config};
-use crate::constants::{DEFAULT_VIRTUAL_PORT, SERIAL_CHECK_INTERVAL_SECS, SERVICE_STATUS_POLL_INTERVAL, SOCKET_RELEASE_DELAY_MS};
+use crate::config::{self, Config, ControllerTransport};
+use crate::constants::{SERVICE_STATUS_POLL_INTERVAL, SOCKET_RELEASE_DELAY_MS};
 use crate::logging::{receiver as log_receiver, Direction, LogEntry, LogKind, LogStore};
 use crate::service;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::mpsc;
 
 /// Bridge runtime state - explicit state machine
@@ -25,8 +24,6 @@ pub enum Bridge {
         handle: Handle,
         log_rx: mpsc::Receiver<LogEntry>,
         serial_port: Option<String>,
-        /// Last time we checked for serial device (throttle in Auto mode)
-        last_serial_check: Instant,
     },
 
     /// Monitoring a Windows/Linux service via UDP
@@ -187,11 +184,7 @@ impl Bridge {
                 log_rx,
                 handle,
                 serial_port,
-                last_serial_check,
             } => {
-                use crate::config::TransportMode;
-                use std::time::Duration;
-
                 // Drain log channel
                 while let Ok(entry) = log_rx.try_recv() {
                     logs.add(entry);
@@ -200,35 +193,12 @@ impl Bridge {
                 // Check if bridge stopped/errored
                 let state = handle.state();
                 if matches!(state, BridgeState::Stopped | BridgeState::Error) {
-                    // In Auto mode, try to restart (will use virtual if no serial)
-                    if cfg.bridge.transport_mode == TransportMode::Auto {
-                        logs.add(LogEntry::system("Connection lost, restarting..."));
-                        let new_serial = config::detect_serial(cfg);
-                        *self = Self::start_local(cfg, new_serial, logs);
-                    } else {
-                        *self = Self::Stopped {
-                            serial_port: serial_port.take(),
-                        };
-                    }
+                    // For Serial transport, the runner handles auto-reconnection internally.
+                    // If we get here with Stopped/Error, just update state.
+                    *self = Self::Stopped {
+                        serial_port: serial_port.take(),
+                    };
                     return;
-                }
-
-                // In Auto mode: check if we should switch between serial/virtual
-                // Throttled to avoid USB enumeration every frame (60fps)
-                if cfg.bridge.transport_mode == TransportMode::Auto
-                    && last_serial_check.elapsed() >= Duration::from_secs(SERIAL_CHECK_INTERVAL_SECS)
-                {
-                    *last_serial_check = Instant::now();
-                    let current_serial = config::detect_serial(cfg);
-                    // Using virtual fallback, serial now detected → restart with serial
-                    if let (None, Some(port)) = (serial_port.as_ref(), &current_serial) {
-                        logs.add(LogEntry::system(format!(
-                            "Device detected: {}, switching to serial",
-                            port
-                        )));
-                        handle.stop();
-                        *self = Self::start_local(cfg, current_serial, logs);
-                    }
                 }
             }
             Self::Monitoring {
@@ -299,7 +269,7 @@ impl Bridge {
         logs.add(LogEntry::system("Installing service..."));
 
         // service::install() handles elevation internally
-        match service::install(None, cfg.bridge.udp_port) {
+        match service::install(None, cfg.bridge.host_udp_port) {
             Ok(_) => logs.add(LogEntry::system("Service installed")),
             Err(e) => logs.add(LogEntry::system(format!("Install failed: {}", e))),
         }
@@ -321,70 +291,41 @@ impl Bridge {
     // =========================================================================
 
     fn start_local(cfg: &Config, serial_port: Option<String>, logs: &mut LogStore) -> Self {
-        use crate::config::TransportMode;
-
-        // Determine if we use serial or virtual based on mode and availability
-        let (port_name, use_virtual) = match cfg.bridge.transport_mode {
-            TransportMode::Virtual => {
-                // Explicit virtual mode
-                (String::new(), true)
-            }
-            TransportMode::Serial => {
-                // Explicit serial mode - fail if no device
+        // Log what we're starting based on transport config
+        let controller_info = match cfg.bridge.controller_transport {
+            ControllerTransport::Serial => {
                 match &serial_port {
-                    Some(p) => (p.clone(), false),
-                    None => {
-                        logs.add(LogEntry::system("Cannot start: no serial port detected"));
-                        return Self::Stopped { serial_port };
-                    }
+                    Some(p) => format!("Serial:{}", p),
+                    None => "Serial:auto".to_string(),
                 }
             }
-            TransportMode::Auto => {
-                // Auto mode - use serial if available, otherwise fallback to virtual
-                match &serial_port {
-                    Some(p) => (p.clone(), false),
-                    None => {
-                        logs.add(LogEntry::system("No device detected, using virtual mode"));
-                        (String::new(), true)
-                    }
-                }
-            }
+            ControllerTransport::Udp => format!("UDP:{}", cfg.bridge.controller_udp_port),
+            ControllerTransport::WebSocket => format!("WS:{}", cfg.bridge.controller_websocket_port),
         };
 
-        // Log what we're starting
-        if use_virtual {
-            let vport = cfg.bridge.virtual_port.unwrap_or(DEFAULT_VIRTUAL_PORT);
-            logs.add(LogEntry::system(format!(
-                "Starting virtual: UDP:{} <-> UDP:{}",
-                vport, cfg.bridge.udp_port
-            )));
-        } else {
-            logs.add(LogEntry::system(format!(
-                "Starting bridge: {} <-> UDP:{}",
-                port_name, cfg.bridge.udp_port
-            )));
-        }
-
-        let virtual_port = if use_virtual {
-            cfg.bridge.virtual_port
-        } else {
-            None
+        let host_info = match cfg.bridge.host_transport {
+            crate::config::HostTransport::Udp => format!("UDP:{}", cfg.bridge.host_udp_port),
+            crate::config::HostTransport::WebSocket => format!("WS:{}", cfg.bridge.host_websocket_port),
+            crate::config::HostTransport::Both => format!(
+                "UDP:{} + WS:{}",
+                cfg.bridge.host_udp_port,
+                cfg.bridge.host_websocket_port
+            ),
         };
 
-        let bridge_cfg = BridgeConfig {
-            transport_mode: if use_virtual { TransportMode::Virtual } else { TransportMode::Serial },
-            serial_port: port_name,
-            udp_port: cfg.bridge.udp_port,
-            virtual_port,
-            ..Default::default()
-        };
+        logs.add(LogEntry::system(format!(
+            "Starting bridge: {} (controller) <-> {} (host)",
+            controller_info, host_info
+        )));
+
+        // Create bridge config (copy from app config)
+        let bridge_cfg = cfg.bridge.clone();
 
         match bridge::start(bridge_cfg) {
             Ok((handle, log_rx)) => Self::Running {
                 handle,
                 log_rx,
                 serial_port,
-                last_serial_check: Instant::now(),
             },
             Err(e) => {
                 logs.add(LogEntry::system(format!("Failed to start: {}", e)));

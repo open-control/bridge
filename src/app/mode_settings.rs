@@ -1,6 +1,6 @@
 //! Mode settings popup state and logic
 
-use crate::config::TransportMode;
+use crate::config::{ControllerTransport, HostTransport};
 use crossterm::event::KeyCode;
 
 /// Action returned by handle_key for App to execute
@@ -17,30 +17,39 @@ pub enum ModeAction {
 /// Which field is currently selected in the popup
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModeField {
-    Mode,
+    ControllerTransport,
     DevicePreset,
-    UdpPort,
-    VirtualPort,
+    ControllerUdpPort,
+    ControllerWsPort,
+    HostTransport,
+    HostUdpPort,
+    HostWsPort,
 }
 
 impl ModeField {
     /// Get next field
     pub fn next(self) -> Self {
         match self {
-            ModeField::Mode => ModeField::DevicePreset,
-            ModeField::DevicePreset => ModeField::UdpPort,
-            ModeField::UdpPort => ModeField::VirtualPort,
-            ModeField::VirtualPort => ModeField::Mode,
+            ModeField::ControllerTransport => ModeField::DevicePreset,
+            ModeField::DevicePreset => ModeField::ControllerUdpPort,
+            ModeField::ControllerUdpPort => ModeField::ControllerWsPort,
+            ModeField::ControllerWsPort => ModeField::HostTransport,
+            ModeField::HostTransport => ModeField::HostUdpPort,
+            ModeField::HostUdpPort => ModeField::HostWsPort,
+            ModeField::HostWsPort => ModeField::ControllerTransport,
         }
     }
 
     /// Get previous field
     pub fn prev(self) -> Self {
         match self {
-            ModeField::Mode => ModeField::VirtualPort,
-            ModeField::DevicePreset => ModeField::Mode,
-            ModeField::UdpPort => ModeField::DevicePreset,
-            ModeField::VirtualPort => ModeField::UdpPort,
+            ModeField::ControllerTransport => ModeField::HostWsPort,
+            ModeField::DevicePreset => ModeField::ControllerTransport,
+            ModeField::ControllerUdpPort => ModeField::DevicePreset,
+            ModeField::ControllerWsPort => ModeField::ControllerUdpPort,
+            ModeField::HostTransport => ModeField::ControllerWsPort,
+            ModeField::HostUdpPort => ModeField::HostTransport,
+            ModeField::HostWsPort => ModeField::HostUdpPort,
         }
     }
 }
@@ -48,11 +57,19 @@ impl ModeField {
 /// State for the mode settings popup
 #[derive(Debug, Clone)]
 pub struct ModeSettings {
-    pub transport_mode: TransportMode,
+    // Controller settings
+    pub controller_transport: ControllerTransport,
     pub device_preset: Option<String>,
     pub available_presets: Vec<String>,
-    pub udp_port: u16,
-    pub virtual_port: u16,
+    pub controller_udp_port: u16,
+    pub controller_websocket_port: u16,
+    
+    // Host settings
+    pub host_transport: HostTransport,
+    pub host_udp_port: u16,
+    pub host_websocket_port: u16,
+    
+    // UI state
     pub selected_field: ModeField,
     pub editing: bool,
     pub input_buffer: String,
@@ -60,30 +77,45 @@ pub struct ModeSettings {
 
 impl ModeSettings {
     pub fn new(
-        transport_mode: TransportMode,
+        controller_transport: ControllerTransport,
         device_preset: Option<String>,
         available_presets: Vec<String>,
-        udp_port: u16,
-        virtual_port: u16,
+        controller_udp_port: u16,
+        controller_websocket_port: u16,
+        host_transport: HostTransport,
+        host_udp_port: u16,
+        host_websocket_port: u16,
     ) -> Self {
         Self {
-            transport_mode,
+            controller_transport,
             device_preset,
             available_presets,
-            udp_port,
-            virtual_port,
-            selected_field: ModeField::Mode,
+            controller_udp_port,
+            controller_websocket_port,
+            host_transport,
+            host_udp_port,
+            host_websocket_port,
+            selected_field: ModeField::ControllerTransport,
             editing: false,
             input_buffer: String::new(),
         }
     }
 
-    /// Cycle transport mode: Auto → Serial → Virtual → Auto
-    pub fn cycle_transport_mode(&mut self) {
-        self.transport_mode = match self.transport_mode {
-            TransportMode::Auto => TransportMode::Serial,
-            TransportMode::Serial => TransportMode::Virtual,
-            TransportMode::Virtual => TransportMode::Auto,
+    /// Cycle controller transport: Serial → Udp → WebSocket → Serial
+    pub fn cycle_controller_transport(&mut self) {
+        self.controller_transport = match self.controller_transport {
+            ControllerTransport::Serial => ControllerTransport::Udp,
+            ControllerTransport::Udp => ControllerTransport::WebSocket,
+            ControllerTransport::WebSocket => ControllerTransport::Serial,
+        };
+    }
+
+    /// Cycle host transport: Udp → WebSocket → Both → Udp
+    pub fn cycle_host_transport(&mut self) {
+        self.host_transport = match self.host_transport {
+            HostTransport::Udp => HostTransport::WebSocket,
+            HostTransport::WebSocket => HostTransport::Both,
+            HostTransport::Both => HostTransport::Udp,
         };
     }
 
@@ -130,19 +162,30 @@ impl ModeSettings {
     /// Start editing the current field (for port fields)
     pub fn start_editing(&mut self) {
         match self.selected_field {
-            ModeField::Mode => {
-                self.cycle_transport_mode();
+            ModeField::ControllerTransport => {
+                self.cycle_controller_transport();
             }
             ModeField::DevicePreset => {
                 self.cycle_device_preset();
             }
-            ModeField::UdpPort => {
+            ModeField::ControllerUdpPort => {
                 self.editing = true;
-                self.input_buffer = self.udp_port.to_string();
+                self.input_buffer = self.controller_udp_port.to_string();
             }
-            ModeField::VirtualPort => {
+            ModeField::ControllerWsPort => {
                 self.editing = true;
-                self.input_buffer = self.virtual_port.to_string();
+                self.input_buffer = self.controller_websocket_port.to_string();
+            }
+            ModeField::HostTransport => {
+                self.cycle_host_transport();
+            }
+            ModeField::HostUdpPort => {
+                self.editing = true;
+                self.input_buffer = self.host_udp_port.to_string();
+            }
+            ModeField::HostWsPort => {
+                self.editing = true;
+                self.input_buffer = self.host_websocket_port.to_string();
             }
         }
     }
@@ -167,8 +210,10 @@ impl ModeSettings {
             if let Ok(port) = self.input_buffer.parse::<u16>() {
                 if port > 0 {
                     match self.selected_field {
-                        ModeField::UdpPort => self.udp_port = port,
-                        ModeField::VirtualPort => self.virtual_port = port,
+                        ModeField::ControllerUdpPort => self.controller_udp_port = port,
+                        ModeField::ControllerWsPort => self.controller_websocket_port = port,
+                        ModeField::HostUdpPort => self.host_udp_port = port,
+                        ModeField::HostWsPort => self.host_websocket_port = port,
                         _ => {}
                     }
                 }

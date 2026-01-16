@@ -35,14 +35,14 @@ pub fn init_tracing(verbose: bool) {
         .try_init();
 }
 
-/// Try to send a log entry, warn if channel full
+/// Try to send a log entry, silently drop if channel full
 ///
 /// Reduces boilerplate for the common pattern of sending logs
 /// with graceful handling of full channels.
+#[allow(unused_variables)]
 pub fn try_log(tx: &Option<tokio::sync::mpsc::Sender<LogEntry>>, entry: LogEntry, context: &str) {
     if let Some(ref sender) = tx {
-        if sender.try_send(entry).is_err() {
-            tracing::warn!("Log channel full: {}", context);
-        }
+        // Silently drop if channel full - not critical
+        let _ = sender.try_send(entry);
     }
 }

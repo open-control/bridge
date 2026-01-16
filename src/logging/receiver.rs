@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::warn;
 
 /// Spawn a UDP log receiver in the background
 ///
@@ -39,29 +38,23 @@ fn run_receiver(tx: mpsc::Sender<LogEntry>, shutdown: Arc<AtomicBool>, port: u16
     // Bind to the broadcast port
     let socket = match UdpSocket::bind(format!("127.0.0.1:{}", port)) {
         Ok(s) => {
-            if tx.try_send(LogEntry::system(format!(
+            let _ = tx.try_send(LogEntry::system(format!(
                 "Log receiver listening on UDP:{}",
                 port
-            ))).is_err() {
-                warn!("Log channel full: receiver_listening");
-            }
+            )));
             s
         }
         Err(e) => {
-            if tx.try_send(LogEntry::system(format!(
+            let _ = tx.try_send(LogEntry::system(format!(
                 "Log receiver bind failed: {}",
                 e
-            ))).is_err() {
-                warn!("Log channel full: receiver_bind_failed");
-            }
+            )));
             return;
         }
     };
 
     // Set read timeout for responsive shutdown
-    if let Err(e) = socket.set_read_timeout(Some(Duration::from_millis(100))) {
-        warn!("Failed to set socket timeout: {}", e);
-    }
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
 
     let mut buf = [0u8; 65535];
 
@@ -76,9 +69,7 @@ fn run_receiver(tx: mpsc::Sender<LogEntry>, shutdown: Arc<AtomicBool>, port: u16
                     // Handle potential multiple JSON messages in one packet
                     for line in text.lines() {
                         if let Ok(entry) = serde_json::from_str::<LogEntry>(line) {
-                            if tx.try_send(entry).is_err() {
-                                warn!("Log channel full: receiver_entry");
-                            }
+                            let _ = tx.try_send(entry);
                         }
                     }
                 }

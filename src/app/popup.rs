@@ -5,7 +5,6 @@
 use super::mode_settings::ModeSettings;
 use super::App;
 use crate::config::{self, list_device_presets};
-use crate::constants::DEFAULT_VIRTUAL_PORT;
 use crate::logging::LogEntry;
 
 impl App {
@@ -17,14 +16,14 @@ impl App {
     /// Open mode settings popup
     pub fn open_mode_settings(&mut self) {
         self.mode_popup = Some(ModeSettings::new(
-            self.config.bridge.transport_mode,
+            self.config.bridge.controller_transport,
             self.config.bridge.device_preset.clone(),
             list_device_presets(),
-            self.config.bridge.udp_port,
-            self.config
-                .bridge
-                .virtual_port
-                .unwrap_or(DEFAULT_VIRTUAL_PORT),
+            self.config.bridge.controller_udp_port,
+            self.config.bridge.controller_websocket_port,
+            self.config.bridge.host_transport,
+            self.config.bridge.host_udp_port,
+            self.config.bridge.host_websocket_port,
         ));
     }
 
@@ -45,11 +44,16 @@ impl App {
             self.bridge.stop(&self.config, &mut self.logs);
         }
 
-        // Update config
-        self.config.bridge.transport_mode = settings.transport_mode;
+        // Update config - Controller side
+        self.config.bridge.controller_transport = settings.controller_transport;
         self.config.bridge.device_preset = settings.device_preset.clone();
-        self.config.bridge.udp_port = settings.udp_port;
-        self.config.bridge.virtual_port = Some(settings.virtual_port);
+        self.config.bridge.controller_udp_port = settings.controller_udp_port;
+        self.config.bridge.controller_websocket_port = settings.controller_websocket_port;
+        
+        // Update config - Host side
+        self.config.bridge.host_transport = settings.host_transport;
+        self.config.bridge.host_udp_port = settings.host_udp_port;
+        self.config.bridge.host_websocket_port = settings.host_websocket_port;
 
         // Save to file
         if let Err(e) = config::save(&self.config) {

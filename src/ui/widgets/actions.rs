@@ -2,7 +2,7 @@
 //!
 //! Shows available commands based on current state.
 
-use crate::app::state::{ControllerTransport, ServiceState, Source};
+use crate::app::state::{ControllerTransportState, ServiceState, Source};
 use crate::app::AppState;
 use crate::ui::theme::{STYLE_ACTION, STYLE_DIM, STYLE_KEY};
 use ratatui::{
@@ -29,8 +29,8 @@ impl Widget for ActionsWidget<'_> {
             Source::Local => {
                 // Check if local bridge is active
                 if matches!(
-                    self.state.controller_transport,
-                    ControllerTransport::Disconnected
+                    self.state.controller_state,
+                    ControllerTransportState::Disconnected
                 ) {
                     "Start"
                 } else {

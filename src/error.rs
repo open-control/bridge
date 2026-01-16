@@ -18,6 +18,10 @@ pub enum BridgeError {
     // === Network ===
     /// Failed to bind UDP socket
     UdpBind { port: u16, source: std::io::Error },
+    /// Failed to bind WebSocket server
+    WebSocketBind { port: u16, source: std::io::Error },
+    /// Failed to accept WebSocket connection
+    WebSocketAccept { source: tokio_tungstenite::tungstenite::Error },
 
     // === Config ===
     /// Failed to read/write config file
@@ -56,9 +60,11 @@ impl std::error::Error for BridgeError {
         match self {
             Self::SerialOpen { source, .. }
             | Self::UdpBind { source, .. }
+            | Self::WebSocketBind { source, .. }
             | Self::ConfigRead { source, .. }
             | Self::ServiceCommand { source }
             | Self::Runtime { source } => Some(source),
+            Self::WebSocketAccept { source } => Some(source),
             _ => None,
         }
     }
@@ -69,6 +75,8 @@ impl fmt::Display for BridgeError {
         match self {
             Self::SerialOpen { port, .. } => write!(f, "Cannot open serial port: {}", port),
             Self::UdpBind { port, .. } => write!(f, "Cannot bind UDP port {}", port),
+            Self::WebSocketBind { port, .. } => write!(f, "Cannot bind WebSocket port {}", port),
+            Self::WebSocketAccept { .. } => write!(f, "Failed to accept WebSocket connection"),
             Self::ConfigRead { path, .. } => {
                 write!(f, "Cannot read config: {}", path.display())
             }

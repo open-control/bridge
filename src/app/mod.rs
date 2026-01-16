@@ -11,11 +11,11 @@ mod popup;
 pub mod state;
 
 pub use mode_settings::{ModeAction, ModeField, ModeSettings};
-pub use state::{AppState, ControllerTransport, ServiceState, Source};
+pub use state::{AppState, ControllerTransportState, HostTransportState, ServiceState, Source};
 
 use crate::bridge_state::{Bridge, ServiceStatusCache};
-use crate::config::{self, Config, TransportMode};
-use crate::constants::{DEFAULT_VIRTUAL_PORT, LOG_CONNECTION_TIMEOUT_SECS, SERVICE_SCM_SETTLE_DELAY_MS, STATUS_MESSAGE_TIMEOUT_SECS};
+use crate::config::{self, Config, ControllerTransport as ControllerTransportConfig, HostTransport as HostTransportConfig};
+use crate::constants::{LOG_CONNECTION_TIMEOUT_SECS, SERVICE_SCM_SETTLE_DELAY_MS, STATUS_MESSAGE_TIMEOUT_SECS};
 use crate::input;
 use crate::logging::{FilterMode, LogEntry, LogFilter, LogStore};
 use crossterm::event::KeyEvent;
@@ -35,7 +35,7 @@ pub struct App {
     pub(super) logs: LogStore,
 
     // Runtime state
-    controller_transport: ControllerTransport,
+    controller_state: ControllerTransportState,
     log_connected: bool,
     last_log_time: Option<Instant>,
     /// True if we stopped the service to run local bridge.
@@ -60,14 +60,14 @@ impl App {
         // - If service is running → Bridge::new() already started monitoring
         // - If nothing running → stay Stopped, wait for user action (S or I)
 
-        let controller_transport = Self::determine_transport(&cfg, &bridge);
+        let controller_state = Self::determine_controller_state(&cfg, &bridge);
 
         let mut app = Self {
             config: cfg,
             bridge,
             service_status,
             logs,
-            controller_transport,
+            controller_state,
             log_connected: false,
             last_log_time: None,
             service_stopped_for_local: false,
@@ -84,18 +84,19 @@ impl App {
     ///
     /// This allows tests to create an App without depending on config files.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn new_with_config(cfg: Config) -> Self {
         let max_entries = cfg.logs.max_entries;
         let (bridge, service_status) = Bridge::new(&cfg);
         let logs = LogStore::new(max_entries);
-        let controller_transport = Self::determine_transport(&cfg, &bridge);
+        let controller_state = Self::determine_controller_state(&cfg, &bridge);
 
         let mut app = Self {
             config: cfg,
             bridge,
             service_status,
             logs,
-            controller_transport,
+            controller_state,
             log_connected: false,
             last_log_time: None,
             service_stopped_for_local: false,
@@ -112,36 +113,58 @@ impl App {
     // Initialization helpers
     // =========================================================================
 
-    fn determine_transport(cfg: &Config, bridge: &Bridge) -> ControllerTransport {
-        match cfg.bridge.transport_mode {
-            TransportMode::Virtual => ControllerTransport::Virtual {
-                port: cfg.bridge.virtual_port.unwrap_or(DEFAULT_VIRTUAL_PORT),
-            },
-            TransportMode::Serial | TransportMode::Auto => match bridge.serial_port() {
-                Some(port) => ControllerTransport::Serial {
+    fn determine_controller_state(cfg: &Config, bridge: &Bridge) -> ControllerTransportState {
+        match cfg.bridge.controller_transport {
+            ControllerTransportConfig::Serial => match bridge.serial_port() {
+                Some(port) => ControllerTransportState::Serial {
                     port: port.to_string(),
                 },
-                None => ControllerTransport::Disconnected,
+                None => ControllerTransportState::Disconnected,
+            },
+            ControllerTransportConfig::Udp => ControllerTransportState::Udp {
+                port: cfg.bridge.controller_udp_port,
+            },
+            ControllerTransportConfig::WebSocket => ControllerTransportState::WebSocket {
+                port: cfg.bridge.controller_websocket_port,
+            },
+        }
+    }
+    
+    fn determine_host_state(cfg: &Config) -> HostTransportState {
+        match cfg.bridge.host_transport {
+            HostTransportConfig::Udp => HostTransportState::Udp {
+                port: cfg.bridge.host_udp_port,
+            },
+            HostTransportConfig::WebSocket => HostTransportState::WebSocket {
+                port: cfg.bridge.host_websocket_port,
+            },
+            HostTransportConfig::Both => HostTransportState::Both {
+                udp_port: cfg.bridge.host_udp_port,
+                ws_port: cfg.bridge.host_websocket_port,
             },
         }
     }
 
     fn log_welcome_message(&mut self) {
         self.logs.add(LogEntry::system("OC Bridge ready"));
-        match &self.controller_transport {
-            ControllerTransport::Serial { port } => {
+        match &self.controller_state {
+            ControllerTransportState::Serial { port } => {
                 self.logs
-                    .add(LogEntry::system(format!("Device detected: {}", port)));
+                    .add(LogEntry::system(format!("Controller: Serial:{}", port)));
             }
-            ControllerTransport::Virtual { port } => {
+            ControllerTransportState::Udp { port } => {
                 self.logs
-                    .add(LogEntry::system(format!("Virtual mode: UDP:{}", port)));
+                    .add(LogEntry::system(format!("Controller: UDP:{}", port)));
             }
-            ControllerTransport::Waiting => {
-                self.logs.add(LogEntry::system("Waiting for device..."));
+            ControllerTransportState::WebSocket { port } => {
+                self.logs
+                    .add(LogEntry::system(format!("Controller: WS:{}", port)));
             }
-            ControllerTransport::Disconnected => {
-                self.logs.add(LogEntry::system("No device detected"));
+            ControllerTransportState::Waiting => {
+                self.logs.add(LogEntry::system("Controller: Waiting for device..."));
+            }
+            ControllerTransportState::Disconnected => {
+                self.logs.add(LogEntry::system("Controller: Disconnected"));
             }
         }
     }
@@ -155,12 +178,16 @@ impl App {
 
         // Determine source and service state
         let (source, service_state) = self.determine_source_and_service_state();
+        
+        // Determine host state
+        let host_state = Self::determine_host_state(&self.config);
 
         AppState {
             source,
-            transport_mode: self.config.bridge.transport_mode,
-            controller_transport: &self.controller_transport,
-            udp_port: self.config.bridge.udp_port,
+            controller_transport_config: self.config.bridge.controller_transport,
+            host_transport_config: self.config.bridge.host_transport,
+            controller_state: &self.controller_state,
+            host_state,
             rx_rate,
             tx_rate,
             service_state,
@@ -213,59 +240,59 @@ impl App {
             }
         }
 
-        self.update_controller_transport();
+        self.update_controller_state();
     }
 
-    fn update_controller_transport(&mut self) {
+    fn update_controller_state(&mut self) {
         let (source, _) = self.determine_source_and_service_state();
 
         match source {
             Source::Service => {
-                // In service mode, detect serial port locally (still visible even if service uses it)
+                // In service mode, we don't know the exact transport config of the service
+                // Just show connection state based on log reception
                 if self.log_connected {
                     if let Some(port) = config::detect_serial(&self.config) {
-                        self.controller_transport = ControllerTransport::Serial { port };
+                        self.controller_state = ControllerTransportState::Serial { port };
                     } else {
-                        // No device detected but receiving logs - might be virtual mode
-                        self.controller_transport = ControllerTransport::Waiting;
+                        self.controller_state = ControllerTransportState::Waiting;
                     }
                 } else {
-                    self.controller_transport = ControllerTransport::Waiting;
+                    self.controller_state = ControllerTransportState::Waiting;
                 }
             }
             Source::Local => {
                 // Local mode - determine from config and bridge state
-                if self.config.bridge.transport_mode == TransportMode::Virtual {
-                    // Explicit virtual mode
-                    self.controller_transport = ControllerTransport::Virtual {
-                        port: self
-                            .config
-                            .bridge
-                            .virtual_port
-                            .unwrap_or(DEFAULT_VIRTUAL_PORT),
-                    };
-                } else if let Some(port) = self.bridge.serial_port() {
-                    // Using serial
-                    self.controller_transport = ControllerTransport::Serial {
-                        port: port.to_string(),
-                    };
-                } else if self.bridge.is_active() {
-                    // Bridge running but no serial port
-                    if self.config.bridge.transport_mode == TransportMode::Auto {
-                        // Auto mode with virtual fallback
-                        self.controller_transport = ControllerTransport::Virtual {
-                            port: self
-                                .config
-                                .bridge
-                                .virtual_port
-                                .unwrap_or(DEFAULT_VIRTUAL_PORT),
-                        };
-                    } else {
-                        // Serial mode - waiting for device
-                        self.controller_transport = ControllerTransport::Waiting;
+                match self.config.bridge.controller_transport {
+                    ControllerTransportConfig::Serial => {
+                        if let Some(port) = self.bridge.serial_port() {
+                            self.controller_state = ControllerTransportState::Serial {
+                                port: port.to_string(),
+                            };
+                        } else if self.bridge.is_active() {
+                            // Bridge running but waiting for serial device
+                            self.controller_state = ControllerTransportState::Waiting;
+                        } else {
+                            self.controller_state = ControllerTransportState::Disconnected;
+                        }
                     }
-                } else {
-                    self.controller_transport = ControllerTransport::Disconnected;
+                    ControllerTransportConfig::Udp => {
+                        if self.bridge.is_active() {
+                            self.controller_state = ControllerTransportState::Udp {
+                                port: self.config.bridge.controller_udp_port,
+                            };
+                        } else {
+                            self.controller_state = ControllerTransportState::Disconnected;
+                        }
+                    }
+                    ControllerTransportConfig::WebSocket => {
+                        if self.bridge.is_active() {
+                            self.controller_state = ControllerTransportState::WebSocket {
+                                port: self.config.bridge.controller_websocket_port,
+                            };
+                        } else {
+                            self.controller_state = ControllerTransportState::Disconnected;
+                        }
+                    }
                 }
             }
         }

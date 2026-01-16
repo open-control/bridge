@@ -32,7 +32,7 @@ pub mod stats;
 mod runner;
 
 use self::stats::Stats;
-use crate::config::{BridgeConfig, TransportMode};
+use crate::config::BridgeConfig;
 use crate::constants::CHANNEL_CAPACITY;
 use crate::error::Result;
 use crate::logging::LogEntry;
@@ -41,7 +41,6 @@ use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::warn;
 
 /// Bridge state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,39 +96,33 @@ pub fn start(config: BridgeConfig) -> Result<(Handle, mpsc::Receiver<LogEntry>)>
         // Initialize platform optimizations
         platform::init_perf();
 
-        // Mark as running
+        // Send log and mark as running
+        let _ = log_tx.try_send(LogEntry::system("Bridge started"));
         {
             let mut s = state_clone.write();
             *s = State::Running;
         }
-        if log_tx.try_send(LogEntry::system("Bridge started")).is_err() {
-            warn!("Log channel full: bridge_start");
-        }
 
-        // Run the appropriate mode
-        let result = if config.transport_mode == TransportMode::Virtual {
-            runner::virtual_mode(&config, shutdown_clone, stats_clone, Some(log_tx.clone())).await
-        } else {
-            runner::serial_mode(&config, shutdown_clone, stats_clone, Some(log_tx.clone())).await
-        };
+        // Run the bridge with the configured transports
+        let result = runner::run(&config, shutdown_clone, stats_clone, Some(log_tx.clone())).await;
 
-        // Update state based on result
-        match result {
+        // Send log BEFORE changing state to avoid race condition
+        // (poll() may drop log_rx when it sees Stopped/Error state)
+        match &result {
             Ok(_) => {
-                let mut s = state_clone.write();
-                *s = State::Stopped;
-                if log_tx.try_send(LogEntry::system("Bridge stopped")).is_err() {
-                    warn!("Log channel full: bridge_stopped");
-                }
+                let _ = log_tx.try_send(LogEntry::system("Bridge stopped"));
             }
             Err(e) => {
-                let mut s = state_clone.write();
-                *s = State::Error;
-                if log_tx.try_send(LogEntry::system(format!("Bridge error: {}", e))).is_err() {
-                    warn!("Log channel full: bridge_error");
-                }
+                let _ = log_tx.try_send(LogEntry::system(format!("Bridge error: {}", e)));
             }
         }
+        
+        // Now update state
+        let mut s = state_clone.write();
+        *s = match result {
+            Ok(_) => State::Stopped,
+            Err(_) => State::Error,
+        };
     });
 
     let handle = Handle {
@@ -153,9 +146,5 @@ pub async fn run_with_shutdown(
 ) -> Result<()> {
     platform::init_perf();
 
-    if config.transport_mode == TransportMode::Virtual {
-        runner::virtual_mode(config, shutdown, stats, log_tx).await
-    } else {
-        runner::serial_mode(config, shutdown, stats, log_tx).await
-    }
+    runner::run(config, shutdown, stats, log_tx).await
 }

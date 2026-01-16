@@ -1,13 +1,14 @@
 //! Mode settings popup widget
 //!
-//! Displays a modal for editing mode configuration:
-//! - Transport mode (Auto/Serial/Virtual)
-//! - Device preset (for auto-detection)
-//! - UDP port (Bitwig/host)
-//! - Virtual port (controller)
+//! Displays a modal for editing transport configuration:
+//! - Controller transport (Serial/UDP/WebSocket)
+//! - Device preset (for serial auto-detection)
+//! - Controller ports
+//! - Host transport (UDP/WebSocket/Both)
+//! - Host ports
 
 use crate::app::{ModeField, ModeSettings};
-use crate::config::TransportMode;
+use crate::config::{ControllerTransport, HostTransport};
 use crate::ui::theme::{
     style_title, COLOR_BRIGHT, COLOR_RUNNING, COLOR_VALUE, STYLE_BRIGHT, STYLE_LABEL, STYLE_MUTED,
 };
@@ -29,10 +30,10 @@ impl<'a> ModePopup<'a> {
         Self { settings }
     }
 
-    /// Calculate centered popup area (4 fields now)
+    /// Calculate centered popup area (7 fields now)
     fn popup_area(area: Rect) -> Rect {
-        let width = 40.min(area.width.saturating_sub(4));
-        let height = 9.min(area.height.saturating_sub(4));
+        let width = 48.min(area.width.saturating_sub(4));
+        let height = 14.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(width)) / 2;
         let y = (area.height.saturating_sub(height)) / 2;
         Rect::new(x, y, width, height)
@@ -50,39 +51,81 @@ impl Widget for ModePopup<'_> {
         let selected = self.settings.selected_field;
         let editing = self.settings.editing;
 
-        // Store strings to avoid lifetime issues
-        let mode_text = match self.settings.transport_mode {
-            TransportMode::Auto => "Auto",
-            TransportMode::Serial => "Serial",
-            TransportMode::Virtual => "Virtual",
+        // Controller transport
+        let ctrl_text = match self.settings.controller_transport {
+            ControllerTransport::Serial => "Serial",
+            ControllerTransport::Udp => "UDP",
+            ControllerTransport::WebSocket => "WebSocket",
         };
-        let preset_text = self.settings.device_preset_display();
-        let udp_text = self.settings.udp_port.to_string();
-        let virtual_text = self.settings.virtual_port.to_string();
 
-        let mode_line = build_field_line("Mode", mode_text, selected == ModeField::Mode, false, "");
+        // Host transport
+        let host_text = match self.settings.host_transport {
+            HostTransport::Udp => "UDP",
+            HostTransport::WebSocket => "WebSocket",
+            HostTransport::Both => "Both",
+        };
+
+        let preset_text = self.settings.device_preset_display();
+        let ctrl_udp_text = self.settings.controller_udp_port.to_string();
+        let ctrl_ws_text = self.settings.controller_websocket_port.to_string();
+        let host_udp_text = self.settings.host_udp_port.to_string();
+        let host_ws_text = self.settings.host_websocket_port.to_string();
+
+        // Controller section
+        let ctrl_transport_line = build_field_line(
+            "Controller",
+            ctrl_text,
+            selected == ModeField::ControllerTransport,
+            false,
+            "",
+        );
 
         let preset_line = build_field_line(
-            "Device",
+            "  Device",
             preset_text,
             selected == ModeField::DevicePreset,
             false,
             "",
         );
 
-        let udp_line = build_field_line(
-            "UDP Port",
-            &udp_text,
-            selected == ModeField::UdpPort,
-            editing && selected == ModeField::UdpPort,
+        let ctrl_udp_line = build_field_line(
+            "  UDP Port",
+            &ctrl_udp_text,
+            selected == ModeField::ControllerUdpPort,
+            editing && selected == ModeField::ControllerUdpPort,
             &self.settings.input_buffer,
         );
 
-        let virtual_line = build_field_line(
-            "Virtual Port",
-            &virtual_text,
-            selected == ModeField::VirtualPort,
-            editing && selected == ModeField::VirtualPort,
+        let ctrl_ws_line = build_field_line(
+            "  WS Port",
+            &ctrl_ws_text,
+            selected == ModeField::ControllerWsPort,
+            editing && selected == ModeField::ControllerWsPort,
+            &self.settings.input_buffer,
+        );
+
+        // Host section
+        let host_transport_line = build_field_line(
+            "Host",
+            host_text,
+            selected == ModeField::HostTransport,
+            false,
+            "",
+        );
+
+        let host_udp_line = build_field_line(
+            "  UDP Port",
+            &host_udp_text,
+            selected == ModeField::HostUdpPort,
+            editing && selected == ModeField::HostUdpPort,
+            &self.settings.input_buffer,
+        );
+
+        let host_ws_line = build_field_line(
+            "  WS Port",
+            &host_ws_text,
+            selected == ModeField::HostWsPort,
+            editing && selected == ModeField::HostWsPort,
             &self.settings.input_buffer,
         );
 
@@ -97,13 +140,17 @@ impl Widget for ModePopup<'_> {
             Span::styled(" close", STYLE_MUTED),
         ]);
 
-        // Build content - show all 4 fields
+        // Build content
         let content = vec![
             Line::from(""),
-            mode_line,
+            ctrl_transport_line,
             preset_line,
-            udp_line,
-            virtual_line,
+            ctrl_udp_line,
+            ctrl_ws_line,
+            Line::from(""),
+            host_transport_line,
+            host_udp_line,
+            host_ws_line,
             Line::from(""),
             help_line,
         ];
@@ -111,7 +158,7 @@ impl Widget for ModePopup<'_> {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::new().fg(COLOR_RUNNING))
-            .title(Span::styled(" Mode ", style_title()))
+            .title(Span::styled(" Transport Settings ", style_title()))
             .title_alignment(Alignment::Center);
 
         let paragraph = Paragraph::new(content).block(block);
