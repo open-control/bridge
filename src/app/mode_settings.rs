@@ -63,12 +63,12 @@ pub struct ModeSettings {
     pub available_presets: Vec<String>,
     pub controller_udp_port: u16,
     pub controller_websocket_port: u16,
-    
+
     // Host settings
     pub host_transport: HostTransport,
     pub host_udp_port: u16,
     pub host_websocket_port: u16,
-    
+
     // UI state
     pub selected_field: ModeField,
     pub editing: bool,

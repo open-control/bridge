@@ -58,8 +58,12 @@ struct UnsupportedService;
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 impl ServiceManager for UnsupportedService {
-    fn is_installed(&self) -> Result<bool> { Ok(false) }
-    fn is_running(&self) -> Result<bool> { Ok(false) }
+    fn is_installed(&self) -> Result<bool> {
+        Ok(false)
+    }
+    fn is_running(&self) -> Result<bool> {
+        Ok(false)
+    }
     fn install(&self, _: Option<&str>, _: u16) -> Result<()> {
         Err(BridgeError::PlatformNotSupported { feature: "service" })
     }
@@ -82,13 +86,19 @@ impl ServiceManager for UnsupportedService {
 #[inline]
 fn service() -> impl ServiceManager {
     #[cfg(target_os = "windows")]
-    { windows::WindowsService }
+    {
+        windows::WindowsService
+    }
 
     #[cfg(target_os = "linux")]
-    { linux::LinuxService }
+    {
+        linux::LinuxService
+    }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    { UnsupportedService }
+    {
+        UnsupportedService
+    }
 }
 
 /// Check if the service is installed
@@ -131,7 +141,9 @@ pub fn stop() -> Result<()> {
 /// Other platforms: Returns error (not applicable).
 pub fn run_as_service(port: Option<&str>, udp_port: u16) -> Result<()> {
     #[cfg(target_os = "windows")]
-    { windows::run_as_service(port, udp_port) }
+    {
+        windows::run_as_service(port, udp_port)
+    }
 
     #[cfg(not(target_os = "windows"))]
     {

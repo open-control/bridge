@@ -7,11 +7,15 @@ use super::session::BridgeSession;
 use super::stats::Stats;
 use crate::codec::{CobsDebugCodec, RawCodec};
 use crate::config::{BridgeConfig, ControllerTransport, HostTransport};
-use crate::constants::{CHANNEL_CAPACITY, POST_DISCONNECT_DELAY_SECS, RECONNECT_DELAY_SECS, UDP_BUFFER_SIZE};
-use bytes::Bytes;
+use crate::constants::{
+    CHANNEL_CAPACITY, POST_DISCONNECT_DELAY_SECS, RECONNECT_DELAY_SECS, UDP_BUFFER_SIZE,
+};
 use crate::error::Result;
 use crate::logging::{self, LogEntry};
-use crate::transport::{SerialTransport, Transport, TransportChannels, UdpTransport, WebSocketTransport};
+use crate::transport::{
+    SerialTransport, Transport, TransportChannels, UdpTransport, WebSocketTransport,
+};
+use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,9 +39,7 @@ pub(super) async fn run(
         ControllerTransport::Serial => {
             run_with_serial_controller(config, shutdown, stats, log_tx).await
         }
-        ControllerTransport::Udp => {
-            run_with_udp_controller(config, shutdown, stats, log_tx).await
-        }
+        ControllerTransport::Udp => run_with_udp_controller(config, shutdown, stats, log_tx).await,
         ControllerTransport::WebSocket => {
             run_with_websocket_controller(config, shutdown, stats, log_tx).await
         }
@@ -70,14 +72,22 @@ async fn run_with_serial_controller(
         let port_name = if config.serial_port.is_empty() {
             // Need device config for auto-detection
             let Some(ref dev_cfg) = device_config else {
-                logging::try_log(&log_tx, LogEntry::system("No device preset configured, waiting..."), "no_preset");
+                logging::try_log(
+                    &log_tx,
+                    LogEntry::system("No device preset configured, waiting..."),
+                    "no_preset",
+                );
                 tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
                 continue;
             };
 
             match SerialTransport::detect(dev_cfg) {
                 Ok(p) => {
-                    logging::try_log(&log_tx, LogEntry::system(format!("Found {} on {}", dev_cfg.name, p)), "device_found");
+                    logging::try_log(
+                        &log_tx,
+                        LogEntry::system(format!("Found {} on {}", dev_cfg.name, p)),
+                        "device_found",
+                    );
                     p
                 }
                 Err(_) => {
@@ -94,7 +104,11 @@ async fn run_with_serial_controller(
         let controller = match SerialTransport::new(&port_name).spawn(shutdown.clone()) {
             Ok(c) => c,
             Err(e) => {
-                logging::try_log(&log_tx, LogEntry::system(format!("Serial open failed: {}", e)), "serial_open_failed");
+                logging::try_log(
+                    &log_tx,
+                    LogEntry::system(format!("Serial open failed: {}", e)),
+                    "serial_open_failed",
+                );
                 tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
                 continue;
             }
@@ -105,10 +119,11 @@ async fn run_with_serial_controller(
 
         // Log connection info
         let host_info = format_host_transport_info(config);
-        logging::try_log(&log_tx, LogEntry::system(format!(
-            "Connected: Serial:{} <-> {}",
-            port_name, host_info
-        )), "connected");
+        logging::try_log(
+            &log_tx,
+            LogEntry::system(format!("Connected: Serial:{} <-> {}", port_name, host_info)),
+            "connected",
+        );
 
         // Run session with COBS codec (Serial uses COBS encoding)
         let session = BridgeSession::new(
@@ -127,7 +142,11 @@ async fn run_with_serial_controller(
         }
 
         // Connection lost, wait before retry
-        logging::try_log(&log_tx, LogEntry::system("Connection lost, reconnecting..."), "connection_lost");
+        logging::try_log(
+            &log_tx,
+            LogEntry::system("Connection lost, reconnecting..."),
+            "connection_lost",
+        );
         tokio::time::sleep(Duration::from_secs(POST_DISCONNECT_DELAY_SECS)).await;
     }
 
@@ -156,16 +175,24 @@ async fn run_with_udp_controller(
 
     // Log connection info
     let host_info = format_host_transport_info(config);
-    logging::try_log(&log_tx, LogEntry::system(format!(
-        "Bridge started: UDP:{} (controller) <-> {} (host)",
-        config.controller_udp_port, host_info
-    )), "bridge_started");
+    logging::try_log(
+        &log_tx,
+        LogEntry::system(format!(
+            "Bridge started: UDP:{} (controller) <-> {} (host)",
+            config.controller_udp_port, host_info
+        )),
+        "bridge_started",
+    );
 
     // Run session with raw codec (UDP uses raw protocol)
     let session = BridgeSession::new(controller, host, RawCodec, stats.clone(), log_tx.clone());
     session.run(shutdown).await?;
 
-    logging::try_log(&log_tx, LogEntry::system("Bridge stopped"), "bridge_stopped");
+    logging::try_log(
+        &log_tx,
+        LogEntry::system("Bridge stopped"),
+        "bridge_stopped",
+    );
 
     Ok(())
 }
@@ -185,23 +212,32 @@ async fn run_with_websocket_controller(
     log_tx: Option<mpsc::Sender<LogEntry>>,
 ) -> Result<()> {
     // Create controller transport (WebSocket server)
-    let controller = WebSocketTransport::new(config.controller_websocket_port).spawn(shutdown.clone())?;
+    let controller =
+        WebSocketTransport::new(config.controller_websocket_port).spawn(shutdown.clone())?;
 
     // Create host transport
     let host = create_host_transport(config, shutdown.clone(), &log_tx).await?;
 
     // Log connection info
     let host_info = format_host_transport_info(config);
-    logging::try_log(&log_tx, LogEntry::system(format!(
-        "Bridge started: WS:{} (controller) <-> {} (host)",
-        config.controller_websocket_port, host_info
-    )), "bridge_started");
+    logging::try_log(
+        &log_tx,
+        LogEntry::system(format!(
+            "Bridge started: WS:{} (controller) <-> {} (host)",
+            config.controller_websocket_port, host_info
+        )),
+        "bridge_started",
+    );
 
     // Run session with raw codec (WebSocket uses raw protocol)
     let session = BridgeSession::new(controller, host, RawCodec, stats.clone(), log_tx.clone());
     session.run(shutdown).await?;
 
-    logging::try_log(&log_tx, LogEntry::system("Bridge stopped"), "bridge_stopped");
+    logging::try_log(
+        &log_tx,
+        LogEntry::system("Bridge stopped"),
+        "bridge_stopped",
+    );
 
     Ok(())
 }
@@ -228,15 +264,17 @@ async fn create_host_transport(
         }
         HostTransport::WebSocket => {
             let ws = WebSocketTransport::new(config.host_websocket_port).spawn(shutdown)?;
-            logging::try_log(log_tx, LogEntry::system(format!(
-                "Host WebSocket server on port {}",
-                config.host_websocket_port
-            )), "host_ws_started");
+            logging::try_log(
+                log_tx,
+                LogEntry::system(format!(
+                    "Host WebSocket server on port {}",
+                    config.host_websocket_port
+                )),
+                "host_ws_started",
+            );
             Ok(ws)
         }
-        HostTransport::Both => {
-            create_merged_host_transport(config, shutdown, log_tx).await
-        }
+        HostTransport::Both => create_merged_host_transport(config, shutdown, log_tx).await,
     }
 }
 
@@ -255,17 +293,22 @@ async fn create_merged_host_transport(
     // Spawn WebSocket
     let ws = match WebSocketTransport::new(config.host_websocket_port).spawn(shutdown.clone()) {
         Ok(ws) => {
-            logging::try_log(log_tx, LogEntry::system(format!(
-                "Host WebSocket server on port {}",
-                config.host_websocket_port
-            )), "host_ws_started");
+            logging::try_log(
+                log_tx,
+                LogEntry::system(format!(
+                    "Host WebSocket server on port {}",
+                    config.host_websocket_port
+                )),
+                "host_ws_started",
+            );
             ws
         }
         Err(e) => {
-            logging::try_log(log_tx, LogEntry::system(format!(
-                "Host WebSocket bind failed: {}, using UDP only",
-                e
-            )), "host_ws_bind_failed");
+            logging::try_log(
+                log_tx,
+                LogEntry::system(format!("Host WebSocket bind failed: {}, using UDP only", e)),
+                "host_ws_bind_failed",
+            );
             return Ok(udp);
         }
     };
@@ -281,7 +324,9 @@ async fn create_merged_host_transport(
     tokio::spawn(async move {
         while !shutdown_rx1.load(Ordering::Relaxed) {
             match tokio::time::timeout(Duration::from_millis(100), udp_rx.recv()).await {
-                Ok(Some(data)) => { let _ = merged_tx_udp.send(data).await; }
+                Ok(Some(data)) => {
+                    let _ = merged_tx_udp.send(data).await;
+                }
                 Ok(None) => break,
                 Err(_) => {}
             }
@@ -295,7 +340,9 @@ async fn create_merged_host_transport(
     tokio::spawn(async move {
         while !shutdown_rx2.load(Ordering::Relaxed) {
             match tokio::time::timeout(Duration::from_millis(100), ws_rx.recv()).await {
-                Ok(Some(data)) => { let _ = merged_tx_ws.send(data).await; }
+                Ok(Some(data)) => {
+                    let _ = merged_tx_ws.send(data).await;
+                }
                 Ok(None) => break,
                 Err(_) => {}
             }
@@ -334,6 +381,9 @@ fn format_host_transport_info(config: &BridgeConfig) -> String {
     match config.host_transport {
         HostTransport::Udp => format!("UDP:{}", config.host_udp_port),
         HostTransport::WebSocket => format!("WS:{}", config.host_websocket_port),
-        HostTransport::Both => format!("UDP:{} + WS:{}", config.host_udp_port, config.host_websocket_port),
+        HostTransport::Both => format!(
+            "UDP:{} + WS:{}",
+            config.host_udp_port, config.host_websocket_port
+        ),
     }
 }

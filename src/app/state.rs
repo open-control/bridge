@@ -2,7 +2,9 @@
 //!
 //! Contains the state snapshot used for rendering and the active protocol enum.
 
-use crate::config::{ControllerTransport as ControllerTransportConfig, HostTransport as HostTransportConfig};
+use crate::config::{
+    ControllerTransport as ControllerTransportConfig, HostTransport as HostTransportConfig,
+};
 
 /// Source of bridge execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,15 +64,15 @@ pub enum HostTransportState {
 pub struct AppState<'a> {
     // Runtime state
     pub source: Source,
-    
+
     // Transport configuration
     pub controller_transport_config: ControllerTransportConfig,
     pub host_transport_config: HostTransportConfig,
-    
+
     // Transport runtime state
     pub controller_state: &'a ControllerTransportState,
     pub host_state: HostTransportState,
-    
+
     // Traffic stats
     pub rx_rate: f64,
     pub tx_rate: f64,

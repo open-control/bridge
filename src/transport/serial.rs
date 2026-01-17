@@ -110,9 +110,7 @@ impl SerialTransport {
 /// Check if a serial port matches the device configuration
 fn matches_device(port: &SerialPortInfo, config: &DeviceConfig) -> bool {
     match &port.port_type {
-        SerialPortType::UsbPort(usb) => {
-            usb.vid == config.vid && config.pid_list.contains(&usb.pid)
-        }
+        SerialPortType::UsbPort(usb) => usb.vid == config.vid && config.pid_list.contains(&usb.pid),
         _ => {
             // Fallback: name pattern matching if available
             config

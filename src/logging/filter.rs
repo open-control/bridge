@@ -159,7 +159,10 @@ mod tests {
     #[test]
     fn test_filter_message_types_whitelist() {
         let filter = LogFilter {
-            message_types: ["NoteOn", "NoteOff"].iter().map(|s| s.to_string()).collect(),
+            message_types: ["NoteOn", "NoteOff"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             ..Default::default()
         };
 

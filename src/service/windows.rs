@@ -432,7 +432,9 @@ fn run_bridge_logic(port: Option<String>, udp_port: u16, shutdown: Arc<AtomicBoo
 
     // Create log broadcaster for service → TUI communication
     let log_tx = crate::logging::broadcast::create_log_broadcaster();
-    let _ = log_tx.send(crate::logging::LogEntry::system("Service bridge starting..."));
+    let _ = log_tx.send(crate::logging::LogEntry::system(
+        "Service bridge starting...",
+    ));
 
     // Create runtime and run bridge with log broadcasting
     let rt = match tokio::runtime::Runtime::new() {
@@ -466,26 +468,26 @@ fn run_bridge_logic(port: Option<String>, udp_port: u16, shutdown: Arc<AtomicBoo
 mod sddl {
     /// Access right codes for Windows services
     pub mod rights {
-        pub const QUERY_CONFIG: &str = "CC";      // SERVICE_QUERY_CONFIG
-        pub const QUERY_STATUS: &str = "LC";      // SERVICE_QUERY_STATUS
-        pub const ENUM_DEPENDENTS: &str = "SW";   // SERVICE_ENUMERATE_DEPENDENTS
-        pub const START: &str = "RP";             // SERVICE_START
-        pub const STOP: &str = "WP";              // SERVICE_STOP
-        pub const PAUSE_CONTINUE: &str = "DT";    // SERVICE_PAUSE_CONTINUE
-        pub const INTERROGATE: &str = "LO";       // SERVICE_INTERROGATE
-        pub const USER_CONTROL: &str = "CR";      // SERVICE_USER_DEFINED_CONTROL
-        pub const READ_CONTROL: &str = "RC";      // READ_CONTROL
-        pub const DELETE: &str = "SD";            // DELETE
-        pub const WRITE_DAC: &str = "WD";         // WRITE_DAC
-        pub const WRITE_OWNER: &str = "WO";       // WRITE_OWNER
+        pub const QUERY_CONFIG: &str = "CC"; // SERVICE_QUERY_CONFIG
+        pub const QUERY_STATUS: &str = "LC"; // SERVICE_QUERY_STATUS
+        pub const ENUM_DEPENDENTS: &str = "SW"; // SERVICE_ENUMERATE_DEPENDENTS
+        pub const START: &str = "RP"; // SERVICE_START
+        pub const STOP: &str = "WP"; // SERVICE_STOP
+        pub const PAUSE_CONTINUE: &str = "DT"; // SERVICE_PAUSE_CONTINUE
+        pub const INTERROGATE: &str = "LO"; // SERVICE_INTERROGATE
+        pub const USER_CONTROL: &str = "CR"; // SERVICE_USER_DEFINED_CONTROL
+        pub const READ_CONTROL: &str = "RC"; // READ_CONTROL
+        pub const DELETE: &str = "SD"; // DELETE
+        pub const WRITE_DAC: &str = "WD"; // WRITE_DAC
+        pub const WRITE_OWNER: &str = "WO"; // WRITE_OWNER
     }
 
     /// Well-known security identifiers (trustees)
     pub mod trustees {
-        pub const SYSTEM: &str = "SY";            // Local SYSTEM account
-        pub const ADMINISTRATORS: &str = "BA";    // Built-in Administrators
-        pub const INTERACTIVE: &str = "IU";       // Interactive Users (logged-in)
-        pub const SERVICE: &str = "SU";           // Service Users
+        pub const SYSTEM: &str = "SY"; // Local SYSTEM account
+        pub const ADMINISTRATORS: &str = "BA"; // Built-in Administrators
+        pub const INTERACTIVE: &str = "IU"; // Interactive Users (logged-in)
+        pub const SERVICE: &str = "SU"; // Service Users
     }
 
     /// Build an "Allow" ACE (Access Control Entry)
@@ -511,30 +513,64 @@ fn build_service_sddl() -> String {
 
     // SYSTEM: operational control (no delete/modify permissions)
     let system_ace = sddl::allow(
-        &[QUERY_CONFIG, QUERY_STATUS, ENUM_DEPENDENTS, START, STOP,
-          PAUSE_CONTINUE, INTERROGATE, USER_CONTROL, READ_CONTROL],
+        &[
+            QUERY_CONFIG,
+            QUERY_STATUS,
+            ENUM_DEPENDENTS,
+            START,
+            STOP,
+            PAUSE_CONTINUE,
+            INTERROGATE,
+            USER_CONTROL,
+            READ_CONTROL,
+        ],
         SYSTEM,
     );
 
     // Administrators: full control
     let admin_ace = sddl::allow(
-        &[QUERY_CONFIG, DELETE, QUERY_STATUS, ENUM_DEPENDENTS, START, STOP,
-          PAUSE_CONTINUE, INTERROGATE, USER_CONTROL, READ_CONTROL,
-          WRITE_DAC, WRITE_OWNER],
+        &[
+            QUERY_CONFIG,
+            DELETE,
+            QUERY_STATUS,
+            ENUM_DEPENDENTS,
+            START,
+            STOP,
+            PAUSE_CONTINUE,
+            INTERROGATE,
+            USER_CONTROL,
+            READ_CONTROL,
+            WRITE_DAC,
+            WRITE_OWNER,
+        ],
         ADMINISTRATORS,
     );
 
     // Interactive users: can query, start, stop (main feature)
     let interactive_ace = sddl::allow(
-        &[QUERY_CONFIG, QUERY_STATUS, ENUM_DEPENDENTS, START, STOP,
-          INTERROGATE, READ_CONTROL],
+        &[
+            QUERY_CONFIG,
+            QUERY_STATUS,
+            ENUM_DEPENDENTS,
+            START,
+            STOP,
+            INTERROGATE,
+            READ_CONTROL,
+        ],
         INTERACTIVE,
     );
 
     // Service users: same as interactive
     let service_ace = sddl::allow(
-        &[QUERY_CONFIG, QUERY_STATUS, ENUM_DEPENDENTS, START, STOP,
-          INTERROGATE, READ_CONTROL],
+        &[
+            QUERY_CONFIG,
+            QUERY_STATUS,
+            ENUM_DEPENDENTS,
+            START,
+            STOP,
+            INTERROGATE,
+            READ_CONTROL,
+        ],
         SERVICE,
     );
 
@@ -581,7 +617,10 @@ mod tests {
 
         // Must contain 4 ACEs (one for each trustee)
         let ace_count = sddl.matches("(A;;").count();
-        assert_eq!(ace_count, 4, "Expected 4 ACEs (SYSTEM, Admins, Interactive, Service)");
+        assert_eq!(
+            ace_count, 4,
+            "Expected 4 ACEs (SYSTEM, Admins, Interactive, Service)"
+        );
 
         // Must contain all trustees
         assert!(sddl.contains(";;;SY)"), "Missing SYSTEM trustee");
@@ -591,8 +630,14 @@ mod tests {
 
         // Interactive users must have START (RP) and STOP (WP) rights
         let iu_section = sddl.split(";;;IU)").next().expect("IU section must exist");
-        assert!(iu_section.contains("RP"), "Interactive users must have START (RP) right");
-        assert!(iu_section.contains("WP"), "Interactive users must have STOP (WP) right");
+        assert!(
+            iu_section.contains("RP"),
+            "Interactive users must have START (RP) right"
+        );
+        assert!(
+            iu_section.contains("WP"),
+            "Interactive users must have STOP (WP) right"
+        );
     }
 
     #[test]
@@ -603,10 +648,7 @@ mod tests {
 
     #[test]
     fn test_sddl_dacl_format() {
-        let aces = vec![
-            "(A;;CC;;;SY)".to_string(),
-            "(A;;LC;;;BA)".to_string(),
-        ];
+        let aces = vec!["(A;;CC;;;SY)".to_string(), "(A;;LC;;;BA)".to_string()];
         let dacl = sddl::dacl(&aces);
         assert_eq!(dacl, "D:(A;;CC;;;SY)(A;;LC;;;BA)");
     }

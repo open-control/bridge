@@ -45,10 +45,7 @@ fn run_receiver(tx: mpsc::Sender<LogEntry>, shutdown: Arc<AtomicBool>, port: u16
             s
         }
         Err(e) => {
-            let _ = tx.try_send(LogEntry::system(format!(
-                "Log receiver bind failed: {}",
-                e
-            )));
+            let _ = tx.try_send(LogEntry::system(format!("Log receiver bind failed: {}", e)));
             return;
         }
     };

@@ -7,9 +7,8 @@ use crate::app::AppState;
 use crate::config::{ControllerTransport, HostTransport};
 use crate::constants::WIDE_THRESHOLD;
 use crate::ui::theme::{
-    style_title, COLOR_LOG_RX, COLOR_LOG_TX, COLOR_MUTED, COLOR_RUNNING,
-    COLOR_STOPPED, STYLE_BORDER, STYLE_DIM, STYLE_LABEL, STYLE_VALUE,
-    SYMBOL_IN, SYMBOL_OUT,
+    style_title, COLOR_LOG_RX, COLOR_LOG_TX, COLOR_MUTED, COLOR_RUNNING, COLOR_STOPPED,
+    STYLE_BORDER, STYLE_DIM, STYLE_LABEL, STYLE_VALUE, SYMBOL_IN, SYMBOL_OUT,
 };
 use ratatui::{
     buffer::Buffer,
@@ -126,7 +125,10 @@ impl StatusWidget<'_> {
         let service_spans = self.build_service_spans();
 
         // Calculate spacing for right-alignment
-        let left_content = format!("  Source: {}  Ctrl: {}  Host: {}", source_text, ctrl_text, host_text);
+        let left_content = format!(
+            "  Source: {}  Ctrl: {}  Host: {}",
+            source_text, ctrl_text, host_text
+        );
         let right_content_len = service_spans.iter().map(|s| s.content.len()).sum::<usize>();
         let padding = area.width as usize - left_content.len() - right_content_len - 2;
         let padding_str = " ".repeat(padding.max(1));
@@ -205,9 +207,11 @@ impl StatusWidget<'_> {
             ControllerTransportState::Waiting => {
                 (SYMBOL_DISCONNECTED, COLOR_MUTED, "Waiting...".to_string())
             }
-            ControllerTransportState::Disconnected => {
-                (SYMBOL_DISCONNECTED, COLOR_STOPPED, "Disconnected".to_string())
-            }
+            ControllerTransportState::Disconnected => (
+                SYMBOL_DISCONNECTED,
+                COLOR_STOPPED,
+                "Disconnected".to_string(),
+            ),
         };
 
         let block = Block::default()

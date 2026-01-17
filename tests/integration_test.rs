@@ -40,10 +40,7 @@ impl MockTransport {
     }
 
     /// Spawn the mock transport, returning channels
-    pub fn spawn(
-        self,
-        _shutdown: Arc<AtomicBool>,
-    ) -> (mpsc::Receiver<Bytes>, mpsc::Sender<Bytes>) {
+    pub fn spawn(self, _shutdown: Arc<AtomicBool>) -> (mpsc::Receiver<Bytes>, mpsc::Sender<Bytes>) {
         let (tx_to_bridge, rx_from_mock) = mpsc::channel::<Bytes>(16);
         let (tx_from_bridge, mut rx_to_capture) = mpsc::channel::<Bytes>(16);
 
@@ -300,12 +297,6 @@ max_entries = 5000
 
     let parsed: toml::Value = toml::from_str(config_str).expect("Failed to parse TOML");
 
-    assert_eq!(
-        parsed["bridge"]["udp_port"].as_integer(),
-        Some(9000)
-    );
-    assert_eq!(
-        parsed["bridge"]["transport_mode"].as_str(),
-        Some("Auto")
-    );
+    assert_eq!(parsed["bridge"]["udp_port"].as_integer(), Some(9000));
+    assert_eq!(parsed["bridge"]["transport_mode"].as_str(), Some("Auto"));
 }

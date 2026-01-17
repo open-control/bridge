@@ -21,7 +21,9 @@ pub enum BridgeError {
     /// Failed to bind WebSocket server
     WebSocketBind { port: u16, source: std::io::Error },
     /// Failed to accept WebSocket connection
-    WebSocketAccept { source: tokio_tungstenite::tungstenite::Error },
+    WebSocketAccept {
+        source: tokio_tungstenite::tungstenite::Error,
+    },
 
     // === Config ===
     /// Failed to read/write config file

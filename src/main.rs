@@ -97,7 +97,10 @@ async fn run_tui() -> Result<()> {
 ///
 /// Used for development workflows where the bridge runs in background
 /// while compiling/running WASM or native apps.
-async fn run_headless(controller: Option<ControllerArg>, controller_port: Option<u16>) -> Result<()> {
+async fn run_headless(
+    controller: Option<ControllerArg>,
+    controller_port: Option<u16>,
+) -> Result<()> {
     let controller_transport = controller.unwrap_or_default();
 
     // Determine port (CLI override or default)

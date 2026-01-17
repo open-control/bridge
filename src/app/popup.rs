@@ -49,7 +49,7 @@ impl App {
         self.config.bridge.device_preset = settings.device_preset.clone();
         self.config.bridge.controller_udp_port = settings.controller_udp_port;
         self.config.bridge.controller_websocket_port = settings.controller_websocket_port;
-        
+
         // Update config - Host side
         self.config.bridge.host_transport = settings.host_transport;
         self.config.bridge.host_udp_port = settings.host_udp_port;
