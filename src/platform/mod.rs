@@ -74,10 +74,14 @@ pub fn run_elevated_action(action: &str) -> Result<()> {
 /// - Other platforms: Returns false (no equivalent concept for systemd user services)
 pub fn is_elevated() -> bool {
     #[cfg(windows)]
-    { windows::is_elevated() }
+    {
+        windows::is_elevated()
+    }
 
     #[cfg(not(windows))]
-    { false }
+    {
+        false
+    }
 }
 
 // =============================================================================

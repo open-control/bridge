@@ -14,8 +14,13 @@ pub use mode_settings::{ModeAction, ModeField, ModeSettings};
 pub use state::{AppState, ControllerTransportState, HostTransportState, ServiceState, Source};
 
 use crate::bridge_state::{Bridge, ServiceStatusCache};
-use crate::config::{self, Config, ControllerTransport as ControllerTransportConfig, HostTransport as HostTransportConfig};
-use crate::constants::{LOG_CONNECTION_TIMEOUT_SECS, SERVICE_SCM_SETTLE_DELAY_MS, STATUS_MESSAGE_TIMEOUT_SECS};
+use crate::config::{
+    self, Config, ControllerTransport as ControllerTransportConfig,
+    HostTransport as HostTransportConfig,
+};
+use crate::constants::{
+    LOG_CONNECTION_TIMEOUT_SECS, SERVICE_SCM_SETTLE_DELAY_MS, STATUS_MESSAGE_TIMEOUT_SECS,
+};
 use crate::input;
 use crate::logging::{FilterMode, LogEntry, LogFilter, LogStore};
 use crossterm::event::KeyEvent;
@@ -129,7 +134,7 @@ impl App {
             },
         }
     }
-    
+
     fn determine_host_state(cfg: &Config) -> HostTransportState {
         match cfg.bridge.host_transport {
             HostTransportConfig::Udp => HostTransportState::Udp {
@@ -161,7 +166,8 @@ impl App {
                     .add(LogEntry::system(format!("Controller: WS:{}", port)));
             }
             ControllerTransportState::Waiting => {
-                self.logs.add(LogEntry::system("Controller: Waiting for device..."));
+                self.logs
+                    .add(LogEntry::system("Controller: Waiting for device..."));
             }
             ControllerTransportState::Disconnected => {
                 self.logs.add(LogEntry::system("Controller: Disconnected"));
@@ -178,7 +184,7 @@ impl App {
 
         // Determine source and service state
         let (source, service_state) = self.determine_source_and_service_state();
-        
+
         // Determine host state
         let host_state = Self::determine_host_state(&self.config);
 
@@ -326,14 +332,21 @@ impl App {
     pub fn toggle_local_bridge(&mut self) {
         // Case 1: Service is running → stop it to start local
         if self.service_status.is_running() {
-            self.logs.add(LogEntry::system("Stopping service to start local bridge..."));
+            self.logs.add(LogEntry::system(
+                "Stopping service to start local bridge...",
+            ));
             if let Err(e) = crate::service::stop() {
-                self.logs.add(LogEntry::system(format!("Warning: service stop failed: {}", e)));
+                self.logs.add(LogEntry::system(format!(
+                    "Warning: service stop failed: {}",
+                    e
+                )));
             }
             // Wait for service to stop before refreshing status.
             // Intentionally blocking - this is a sync method called from UI key handler,
             // and 500ms delay only happens on explicit user action (pressing 'S').
-            std::thread::sleep(std::time::Duration::from_millis(SERVICE_SCM_SETTLE_DELAY_MS));
+            std::thread::sleep(std::time::Duration::from_millis(
+                SERVICE_SCM_SETTLE_DELAY_MS,
+            ));
             self.service_status.refresh();
             self.service_stopped_for_local = true;
 
@@ -351,9 +364,14 @@ impl App {
             self.bridge.stop(&self.config, &mut self.logs);
             self.logs.add(LogEntry::system("Restarting service..."));
             if let Err(e) = crate::service::start() {
-                self.logs.add(LogEntry::system(format!("Warning: service restart failed: {}", e)));
+                self.logs.add(LogEntry::system(format!(
+                    "Warning: service restart failed: {}",
+                    e
+                )));
             }
-            std::thread::sleep(std::time::Duration::from_millis(SERVICE_SCM_SETTLE_DELAY_MS));
+            std::thread::sleep(std::time::Duration::from_millis(
+                SERVICE_SCM_SETTLE_DELAY_MS,
+            ));
             self.service_status.refresh();
             self.service_stopped_for_local = false;
             return;
@@ -378,7 +396,9 @@ impl App {
     /// Toggle service (Alt+S key)
     pub fn toggle_service(&mut self) {
         if !self.service_status.is_installed() {
-            self.logs.add(LogEntry::system("Service not installed. Use 'I' to install."));
+            self.logs.add(LogEntry::system(
+                "Service not installed. Use 'I' to install.",
+            ));
             return;
         }
 
@@ -390,7 +410,9 @@ impl App {
             self.logs.add(LogEntry::system("Stopping service..."));
             match crate::service::stop() {
                 Ok(_) => self.logs.add(LogEntry::system("Service stopped")),
-                Err(e) => self.logs.add(LogEntry::system(format!("Failed to stop: {}", e))),
+                Err(e) => self
+                    .logs
+                    .add(LogEntry::system(format!("Failed to stop: {}", e))),
             }
         } else {
             // Start service
@@ -400,7 +422,9 @@ impl App {
                     self.logs.add(LogEntry::system("Service started"));
                     // Monitoring will be auto-started by poll() when service is detected
                 }
-                Err(e) => self.logs.add(LogEntry::system(format!("Failed to start: {}", e))),
+                Err(e) => self
+                    .logs
+                    .add(LogEntry::system(format!("Failed to start: {}", e))),
             }
         }
 
@@ -420,7 +444,9 @@ impl App {
         self.service_stopped_for_local = false;
 
         // Refresh status to detect if service started
-        std::thread::sleep(std::time::Duration::from_millis(SERVICE_SCM_SETTLE_DELAY_MS));
+        std::thread::sleep(std::time::Duration::from_millis(
+            SERVICE_SCM_SETTLE_DELAY_MS,
+        ));
         self.service_status.refresh();
     }
 

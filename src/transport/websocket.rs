@@ -78,10 +78,9 @@ async fn run_websocket_server(
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
-    let listener = TcpListener::bind(&addr).await.map_err(|e| BridgeError::WebSocketBind {
-        port,
-        source: e,
-    })?;
+    let listener = TcpListener::bind(&addr)
+        .await
+        .map_err(|e| BridgeError::WebSocketBind { port, source: e })?;
 
     info!("WebSocket server listening on ws://{}", addr);
 
@@ -129,7 +128,8 @@ async fn run_websocket_server(
                 let client_tx_ref = client_tx.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_websocket_client(stream, addr, in_tx, ws_out_rx, shutdown).await
+                    if let Err(e) =
+                        handle_websocket_client(stream, addr, in_tx, ws_out_rx, shutdown).await
                     {
                         debug!("WebSocket client {} error: {}", addr, e);
                     }
@@ -181,8 +181,8 @@ async fn handle_websocket_client(
                     // Ignore text, ping, pong, close messages
                 }
                 Ok(Some(Err(_))) => break, // WebSocket error
-                Ok(None) => break,          // Connection closed
-                Err(_) => {}                // Timeout
+                Ok(None) => break,         // Connection closed
+                Err(_) => {}               // Timeout
             }
         }
     });
@@ -193,7 +193,11 @@ async fn handle_websocket_client(
         while !shutdown_tx.load(Ordering::Relaxed) {
             match tokio::time::timeout(Duration::from_millis(100), out_rx.recv()).await {
                 Ok(Some(data)) => {
-                    if ws_sink.send(Message::Binary(data.to_vec().into())).await.is_err() {
+                    if ws_sink
+                        .send(Message::Binary(data.to_vec().into()))
+                        .await
+                        .is_err()
+                    {
                         break; // WebSocket error
                     }
                 }

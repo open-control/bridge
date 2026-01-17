@@ -116,7 +116,7 @@ pub fn start(config: BridgeConfig) -> Result<(Handle, mpsc::Receiver<LogEntry>)>
                 let _ = log_tx.try_send(LogEntry::system(format!("Bridge error: {}", e)));
             }
         }
-        
+
         // Now update state
         let mut s = state_clone.write();
         *s = match result {

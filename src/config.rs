@@ -4,9 +4,8 @@
 //! Device presets are stored in `config/devices/*.toml`
 
 use crate::constants::{
-    DEFAULT_CONTROLLER_UDP_PORT, DEFAULT_CONTROLLER_WEBSOCKET_PORT,
-    DEFAULT_HOST_UDP_PORT, DEFAULT_HOST_WEBSOCKET_PORT,
-    DEFAULT_LOG_BROADCAST_PORT,
+    DEFAULT_CONTROLLER_UDP_PORT, DEFAULT_CONTROLLER_WEBSOCKET_PORT, DEFAULT_HOST_UDP_PORT,
+    DEFAULT_HOST_WEBSOCKET_PORT, DEFAULT_LOG_BROADCAST_PORT,
 };
 use crate::error::{BridgeError, Result};
 use serde::{Deserialize, Serialize};
@@ -145,7 +144,6 @@ pub struct BridgeConfig {
     // =========================================================================
     // Controller Side (source of MIDI messages)
     // =========================================================================
-
     /// Transport type for the controller
     pub controller_transport: ControllerTransport,
 
@@ -169,7 +167,6 @@ pub struct BridgeConfig {
     // =========================================================================
     // Host Side (destination of MIDI messages)
     // =========================================================================
-
     /// Transport type for the host
     pub host_transport: HostTransport,
 
@@ -184,7 +181,6 @@ pub struct BridgeConfig {
     // =========================================================================
     // Logs
     // =========================================================================
-
     /// UDP port for log broadcast from service to TUI
     pub log_broadcast_port: u16,
 }
@@ -264,7 +260,11 @@ fn find_project_root() -> Result<PathBuf> {
     // Check if we're in target/release or target/debug (dev)
     // exe_dir = .../bridge/target/release, we want .../bridge
     if let Some(target_dir) = exe_dir.parent() {
-        if target_dir.file_name().map(|n| n == "target").unwrap_or(false) {
+        if target_dir
+            .file_name()
+            .map(|n| n == "target")
+            .unwrap_or(false)
+        {
             if let Some(project_root) = target_dir.parent() {
                 if project_root.join("config").exists() {
                     return Ok(project_root.to_path_buf());
@@ -282,19 +282,19 @@ fn find_project_root() -> Result<PathBuf> {
 /// Looks for config.toml, falls back to config/default.toml
 pub fn config_path() -> Result<PathBuf> {
     let root = find_project_root()?;
-    
+
     // First try config.toml (user config)
     let user_config = root.join("config.toml");
     if user_config.exists() {
         return Ok(user_config);
     }
-    
+
     // Fall back to config/default.toml
     let default_config = root.join("config").join("default.toml");
     if default_config.exists() {
         return Ok(default_config);
     }
-    
+
     // Return user config path (will be created if saving)
     Ok(user_config)
 }
@@ -316,12 +316,7 @@ pub fn list_device_presets() -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|x| x == "toml")
-                .unwrap_or(false)
-        })
+        .filter(|e| e.path().extension().map(|x| x == "toml").unwrap_or(false))
         .filter_map(|e| e.path().file_stem()?.to_str().map(String::from))
         .collect()
 }
@@ -440,7 +435,10 @@ mod tests {
         assert_eq!(config.serial_port, "");
         assert_eq!(config.device_preset, None);
         assert_eq!(config.controller_udp_port, DEFAULT_CONTROLLER_UDP_PORT);
-        assert_eq!(config.controller_websocket_port, DEFAULT_CONTROLLER_WEBSOCKET_PORT);
+        assert_eq!(
+            config.controller_websocket_port,
+            DEFAULT_CONTROLLER_WEBSOCKET_PORT
+        );
 
         // Host side
         assert_eq!(config.host_transport, HostTransport::Udp);
@@ -482,9 +480,18 @@ mod tests {
             transport: ControllerTransport,
         }
 
-        let serial = toml::to_string(&Wrapper { transport: ControllerTransport::Serial }).unwrap();
-        let udp = toml::to_string(&Wrapper { transport: ControllerTransport::Udp }).unwrap();
-        let ws = toml::to_string(&Wrapper { transport: ControllerTransport::WebSocket }).unwrap();
+        let serial = toml::to_string(&Wrapper {
+            transport: ControllerTransport::Serial,
+        })
+        .unwrap();
+        let udp = toml::to_string(&Wrapper {
+            transport: ControllerTransport::Udp,
+        })
+        .unwrap();
+        let ws = toml::to_string(&Wrapper {
+            transport: ControllerTransport::WebSocket,
+        })
+        .unwrap();
 
         assert!(serial.contains("transport = \"serial\""));
         assert!(udp.contains("transport = \"udp\""));
@@ -518,9 +525,18 @@ mod tests {
             transport: HostTransport,
         }
 
-        let udp = toml::to_string(&Wrapper { transport: HostTransport::Udp }).unwrap();
-        let ws = toml::to_string(&Wrapper { transport: HostTransport::WebSocket }).unwrap();
-        let both = toml::to_string(&Wrapper { transport: HostTransport::Both }).unwrap();
+        let udp = toml::to_string(&Wrapper {
+            transport: HostTransport::Udp,
+        })
+        .unwrap();
+        let ws = toml::to_string(&Wrapper {
+            transport: HostTransport::WebSocket,
+        })
+        .unwrap();
+        let both = toml::to_string(&Wrapper {
+            transport: HostTransport::Both,
+        })
+        .unwrap();
 
         assert!(udp.contains("transport = \"udp\""));
         assert!(ws.contains("transport = \"websocket\""));
@@ -577,7 +593,10 @@ mod tests {
         let restored: Config = toml::from_str(&toml_str).unwrap();
 
         // Verify controller fields
-        assert_eq!(restored.bridge.controller_transport, ControllerTransport::Udp);
+        assert_eq!(
+            restored.bridge.controller_transport,
+            ControllerTransport::Udp
+        );
         assert_eq!(restored.bridge.serial_port, "COM3");
         assert_eq!(restored.bridge.device_preset, Some("teensy".to_string()));
         assert_eq!(restored.bridge.controller_udp_port, 9103);
@@ -611,7 +630,10 @@ host_udp_port = 9500
         // Rest should be defaults
         assert_eq!(config.bridge.serial_port, "");
         assert_eq!(config.bridge.host_transport, HostTransport::Udp);
-        assert_eq!(config.bridge.controller_udp_port, DEFAULT_CONTROLLER_UDP_PORT);
+        assert_eq!(
+            config.bridge.controller_udp_port,
+            DEFAULT_CONTROLLER_UDP_PORT
+        );
     }
 
     #[test]
@@ -619,7 +641,10 @@ host_udp_port = 9500
         // Completely empty config should use all defaults
         let config: Config = toml::from_str("").unwrap();
 
-        assert_eq!(config.bridge.controller_transport, ControllerTransport::Serial);
+        assert_eq!(
+            config.bridge.controller_transport,
+            ControllerTransport::Serial
+        );
         assert_eq!(config.bridge.host_transport, HostTransport::Udp);
         assert_eq!(config.bridge.host_udp_port, DEFAULT_HOST_UDP_PORT);
         assert_eq!(config.logs.max_entries, 200);

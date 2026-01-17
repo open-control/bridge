@@ -15,7 +15,9 @@ use windows::Win32::Devices::Communication::{
 };
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Media::timeBeginPeriod;
-use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+use windows::Win32::System::Threading::{
+    GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+};
 
 // =============================================================================
 // Performance: Timer resolution

@@ -158,7 +158,14 @@ mod tests {
 
     #[test]
     fn test_cli_parse_headless_with_port() {
-        let cli = Cli::parse_from(["oc-bridge", "--headless", "--controller", "ws", "--controller-port", "8002"]);
+        let cli = Cli::parse_from([
+            "oc-bridge",
+            "--headless",
+            "--controller",
+            "ws",
+            "--controller-port",
+            "8002",
+        ]);
         assert!(cli.headless);
         assert_eq!(cli.controller, Some(ControllerArg::Websocket));
         assert_eq!(cli.controller_port, Some(8002));
@@ -181,7 +188,14 @@ mod tests {
 
     #[test]
     fn test_cli_parse_install() {
-        let cli = Cli::parse_from(["oc-bridge", "install", "--port", "COM3", "--udp-port", "9001"]);
+        let cli = Cli::parse_from([
+            "oc-bridge",
+            "install",
+            "--port",
+            "COM3",
+            "--udp-port",
+            "9001",
+        ]);
         match cli.command {
             Some(Command::Install { port, udp_port }) => {
                 assert_eq!(port, Some("COM3".to_string()));

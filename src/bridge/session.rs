@@ -162,7 +162,11 @@ impl<C: Codec> BridgeSession<C> {
         self.stats.add_tx(data.len());
 
         // Log protocol message
-        logging::try_log(&self.log_tx, LogEntry::protocol_out(&name, data.len()), "protocol_out");
+        logging::try_log(
+            &self.log_tx,
+            LogEntry::protocol_out(&name, data.len()),
+            "protocol_out",
+        );
 
         // Encode for controller transport (e.g., COBS for Serial)
         let mut encoded = Vec::with_capacity(data.len() + 16);

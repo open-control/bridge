@@ -293,23 +293,24 @@ impl Bridge {
     fn start_local(cfg: &Config, serial_port: Option<String>, logs: &mut LogStore) -> Self {
         // Log what we're starting based on transport config
         let controller_info = match cfg.bridge.controller_transport {
-            ControllerTransport::Serial => {
-                match &serial_port {
-                    Some(p) => format!("Serial:{}", p),
-                    None => "Serial:auto".to_string(),
-                }
-            }
+            ControllerTransport::Serial => match &serial_port {
+                Some(p) => format!("Serial:{}", p),
+                None => "Serial:auto".to_string(),
+            },
             ControllerTransport::Udp => format!("UDP:{}", cfg.bridge.controller_udp_port),
-            ControllerTransport::WebSocket => format!("WS:{}", cfg.bridge.controller_websocket_port),
+            ControllerTransport::WebSocket => {
+                format!("WS:{}", cfg.bridge.controller_websocket_port)
+            }
         };
 
         let host_info = match cfg.bridge.host_transport {
             crate::config::HostTransport::Udp => format!("UDP:{}", cfg.bridge.host_udp_port),
-            crate::config::HostTransport::WebSocket => format!("WS:{}", cfg.bridge.host_websocket_port),
+            crate::config::HostTransport::WebSocket => {
+                format!("WS:{}", cfg.bridge.host_websocket_port)
+            }
             crate::config::HostTransport::Both => format!(
                 "UDP:{} + WS:{}",
-                cfg.bridge.host_udp_port,
-                cfg.bridge.host_websocket_port
+                cfg.bridge.host_udp_port, cfg.bridge.host_websocket_port
             ),
         };
 
@@ -343,7 +344,6 @@ impl Bridge {
             stats: Stats::new(),
         }
     }
-
 }
 
 // =============================================================================
