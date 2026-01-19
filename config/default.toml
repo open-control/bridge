@@ -1,24 +1,16 @@
-# Open Control Bridge - Default Configuration
-#
-# This file provides base settings for the bridge.
-# Device presets are stored in config/devices/*.toml
-
 [bridge]
-# Controller side (source)
-controller_transport = "serial"
+controller_transport = "websocket"
 serial_port = ""
-device_preset = "teensy"
 controller_udp_port = 9001
 controller_websocket_port = 8001
-
-# Host side (destination)
 host_transport = "udp"
 host_udp_port = 9000
 host_websocket_port = 8000
+log_broadcast_port = 9999
 
 [logs]
-broadcast_port = 9999
 max_entries = 200
+export_max = 2000
 
 [ui]
 default_filter = "All"
