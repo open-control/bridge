@@ -110,7 +110,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart={exe} --headless {port_arg} --udp-port {udp_port}
+ExecStart={exe} --daemon {port_arg}
 Restart=always
 RestartSec=5
 StandardOutput=journal

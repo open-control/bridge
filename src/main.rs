@@ -8,6 +8,7 @@
 //! ```text
 //! oc-bridge                              Run interactive TUI
 //! oc-bridge -v                           Run with verbose debug output
+//! oc-bridge --daemon                     Run as daemon (Serial, for systemd)
 //! oc-bridge --headless --controller ws   Run headless for WASM apps
 //! oc-bridge --headless --controller udp  Run headless for native apps
 //! oc-bridge install                      Install as system service
@@ -53,11 +54,18 @@ fn main() -> Result<()> {
     // Initialize tracing for internal debug output
     logging::init_tracing(cli.verbose);
 
-    // Handle headless mode
+    // Handle daemon mode (uses config file, for systemd service)
+    if cli.daemon {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| error::BridgeError::Runtime { source: e })?;
+        return rt.block_on(run_daemon(cli.verbose));
+    }
+
+    // Handle headless mode (UDP/WS for dev)
     if cli.headless {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| error::BridgeError::Runtime { source: e })?;
-        return rt.block_on(run_headless(cli.controller, cli.controller_port));
+        return rt.block_on(run_headless(cli.controller, cli.controller_port, cli.udp_port));
     }
 
     // Check if running in a terminal, if not (e.g., launched from desktop), relaunch in one
@@ -93,6 +101,53 @@ async fn run_tui() -> Result<()> {
     ui::run(&mut app).await
 }
 
+/// Run the bridge in daemon mode (no TUI, uses config file)
+///
+/// Designed for systemd service - reads config from default.toml
+/// and uses Serial transport for Teensy hardware.
+async fn run_daemon(verbose: bool) -> Result<()> {
+    let cfg = config::load();
+
+    // Print startup info
+    let controller_info = match cfg.bridge.controller_transport {
+        ControllerTransport::Serial => {
+            let port = config::detect_serial(&cfg)
+                .unwrap_or_else(|| "(auto-detect)".to_string());
+            format!("Serial:{}", port)
+        }
+        ControllerTransport::Udp => format!("UDP:{}", cfg.bridge.controller_udp_port),
+        ControllerTransport::WebSocket => format!("WS:{}", cfg.bridge.controller_websocket_port),
+    };
+
+    let host_info = match cfg.bridge.host_transport {
+        HostTransport::Udp => format!("UDP:{}", cfg.bridge.host_udp_port),
+        HostTransport::WebSocket => format!("WS:{}", cfg.bridge.host_websocket_port),
+        HostTransport::Both => format!("UDP:{} + WS:{}", cfg.bridge.host_udp_port, cfg.bridge.host_websocket_port),
+    };
+
+    println!("oc-bridge daemon mode");
+    println!("  Controller: {}", controller_info);
+    println!("  Host:       {}", host_info);
+    if verbose {
+        println!("  Verbose:    enabled");
+    }
+    println!();
+
+    // Setup shutdown signal
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
+
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        println!("Shutting down...");
+        shutdown_clone.store(true, Ordering::SeqCst);
+    });
+
+    // Run bridge with config
+    let stats = Arc::new(Stats::new());
+    bridge::run_with_shutdown(&cfg.bridge, shutdown, stats, None).await
+}
+
 /// Run the bridge in headless mode (no TUI, logs to stdout)
 ///
 /// Used for development workflows where the bridge runs in background
@@ -100,14 +155,18 @@ async fn run_tui() -> Result<()> {
 async fn run_headless(
     controller: Option<ControllerArg>,
     controller_port: Option<u16>,
+    host_port: Option<u16>,
 ) -> Result<()> {
     let controller_transport = controller.unwrap_or_default();
 
-    // Determine port (CLI override or default)
-    let port = controller_port.unwrap_or_else(|| match controller_transport {
+    // Determine controller port (CLI override or default)
+    let ctrl_port = controller_port.unwrap_or_else(|| match controller_transport {
         ControllerArg::Websocket => DEFAULT_CONTROLLER_WEBSOCKET_PORT,
         ControllerArg::Udp => DEFAULT_CONTROLLER_UDP_PORT,
     });
+
+    // Determine host port (CLI override or default)
+    let host_udp_port = host_port.unwrap_or(DEFAULT_HOST_UDP_PORT);
 
     // Build config based on controller type
     let config = BridgeConfig {
@@ -115,9 +174,10 @@ async fn run_headless(
             ControllerArg::Websocket => ControllerTransport::WebSocket,
             ControllerArg::Udp => ControllerTransport::Udp,
         },
-        controller_websocket_port: port,
-        controller_udp_port: port,
+        controller_websocket_port: ctrl_port,
+        controller_udp_port: ctrl_port,
         host_transport: HostTransport::Udp,
+        host_udp_port,
         ..BridgeConfig::default()
     };
 
@@ -127,8 +187,8 @@ async fn run_headless(
         ControllerArg::Udp => "UDP",
     };
     println!("oc-bridge headless mode");
-    println!("  Controller: {} port {}", transport_name, port);
-    println!("  Host:       UDP port {}", DEFAULT_HOST_UDP_PORT);
+    println!("  Controller: {} port {}", transport_name, ctrl_port);
+    println!("  Host:       UDP port {}", host_udp_port);
     println!("Press Ctrl+C to stop");
     println!();
 

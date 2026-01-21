@@ -5,22 +5,37 @@
 // =============================================================================
 // Network - Controller Side (source of MIDI messages)
 // =============================================================================
+// Port convention:
+//   8xxx = Controller (App → Bridge)
+//   9xxx = Host (Bridge → Bitwig)
+//
+//   800X = Controller UDP (native apps): 8000=core, 8001=bitwig
+//   810X = Controller WS (wasm apps):    8100=core, 8101=bitwig
+//   900X = Host UDP:                     9000=hardware, 9001=native, 9002=wasm
+// =============================================================================
 
 /// Default UDP port for controller (desktop app simulation)
-pub const DEFAULT_CONTROLLER_UDP_PORT: u16 = 9001;
+/// Note: Apps override this per-app (8000=core, 8001=bitwig)
+pub const DEFAULT_CONTROLLER_UDP_PORT: u16 = 8000;
 
 /// Default WebSocket port for controller (browser app simulation)
-pub const DEFAULT_CONTROLLER_WEBSOCKET_PORT: u16 = 8001;
+/// Note: Apps override this per-app (8100=core, 8101=bitwig)
+pub const DEFAULT_CONTROLLER_WEBSOCKET_PORT: u16 = 8100;
 
 // =============================================================================
 // Network - Host Side (destination: Bitwig, DAW)
 // =============================================================================
+// Port convention:
+//   9000 = Hardware (Teensy via serial)
+//   9001 = Native simulator (SDL desktop apps)
+//   9002 = WASM simulator (browser apps)
+// =============================================================================
 
-/// Default UDP port for host communication (Bitwig extension native)
-/// Must match Protocol.java DEFAULT_BRIDGE_PORT in Bitwig extension
+/// Default UDP port for host communication (Bitwig extension)
+/// Convention: 9000=hardware, 9001=native sim, 9002=wasm sim
 pub const DEFAULT_HOST_UDP_PORT: u16 = 9000;
 
-/// Default WebSocket port for host communication (Bitwig extension browser)
+/// Default WebSocket port for host communication (future use)
 pub const DEFAULT_HOST_WEBSOCKET_PORT: u16 = 8000;
 
 // =============================================================================

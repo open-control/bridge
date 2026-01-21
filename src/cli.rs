@@ -43,6 +43,13 @@ pub struct Cli {
     #[arg(long)]
     pub headless: bool,
 
+    /// Run in daemon mode (no TUI, uses config file)
+    ///
+    /// Uses the config from default.toml (Serial transport by default).
+    /// Designed for systemd service or background operation.
+    #[arg(long)]
+    pub daemon: bool,
+
     /// Controller transport type (requires --headless)
     ///
     /// - websocket (or ws): Listen on WebSocket port for browser/WASM apps

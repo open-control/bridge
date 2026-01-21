@@ -1,11 +1,27 @@
+# =============================================================================
+# oc-bridge default configuration
+# =============================================================================
+# Port convention:
+#   Controller (8xxx): 800X = UDP native, 810X = WS wasm (X = app index)
+#   Host (9xxx):       9000 = hardware, 9001 = native sim, 9002 = wasm sim
+# =============================================================================
+
 [bridge]
-controller_transport = "websocket"
+controller_transport = "serial"
 serial_port = ""
-controller_udp_port = 9001
-controller_websocket_port = 8001
+device_preset = "teensy"
+
+# Controller ports (App → Bridge)
+# Apps override these: 8000/8100=core, 8001/8101=bitwig
+controller_udp_port = 8000
+controller_websocket_port = 8100
+
+# Host ports (Bridge → Bitwig)
+# 9000=hardware, 9001=native sim, 9002=wasm sim
 host_transport = "udp"
 host_udp_port = 9000
 host_websocket_port = 8000
+
 log_broadcast_port = 9999
 
 [logs]
