@@ -88,7 +88,7 @@ impl Bridge {
 
         // Auto-start monitoring if service is already running
         let bridge = if service_status.is_running() {
-            Self::start_monitoring()
+            Self::start_monitoring(cfg.bridge.log_broadcast_port)
         } else {
             Self::Stopped { serial_port }
         };
@@ -205,6 +205,7 @@ impl Bridge {
                 log_rx,
                 stats,
                 shutdown,
+                ..
             } => {
                 // Drain log channel and track stats
                 while let Ok(entry) = log_rx.try_recv() {
@@ -239,7 +240,10 @@ impl Bridge {
                 if svc.is_running() {
                     logs.add(LogEntry::system("Service detected, monitoring started"));
                     // Need to use replace pattern to avoid borrow issue
-                    let _ = std::mem::replace(self, Self::start_monitoring());
+                    let _ = std::mem::replace(
+                        self,
+                        Self::start_monitoring(cfg.bridge.log_broadcast_port),
+                    );
                     return;
                 }
                 // Refresh serial detection periodically
@@ -335,9 +339,9 @@ impl Bridge {
         }
     }
 
-    fn start_monitoring() -> Self {
+    fn start_monitoring(log_port: u16) -> Self {
         let shutdown = Arc::new(AtomicBool::new(false));
-        let log_rx = log_receiver::spawn_log_receiver(shutdown.clone());
+        let log_rx = log_receiver::spawn_log_receiver_with_port(shutdown.clone(), log_port);
         Self::Monitoring {
             log_rx,
             shutdown,

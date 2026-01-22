@@ -431,7 +431,7 @@ fn run_bridge_logic(port: Option<String>, udp_port: u16, shutdown: Arc<AtomicBoo
     }
 
     // Create log broadcaster for service → TUI communication
-    let log_tx = crate::logging::broadcast::create_log_broadcaster();
+    let log_tx = crate::logging::broadcast::create_log_broadcaster_with_port(config.log_broadcast_port);
     let _ = log_tx.send(crate::logging::LogEntry::system(
         "Service bridge starting...",
     ));

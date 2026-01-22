@@ -12,6 +12,9 @@ name = "Teensy"
 vid = 0x16C0
 pid_list = [0x0483, 0x0486, 0x0487, 0x0489]
 
+# Keep the canonical PJRC filename.
+udev_rules_filename = "00-teensy.rules"
+
 # Official PJRC udev rules from https://www.pjrc.com/teensy/00-teensy.rules
 udev_rules = """
 # UDEV Rules for Teensy boards, http://www.pjrc.com/teensy/

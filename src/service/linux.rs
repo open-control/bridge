@@ -3,6 +3,7 @@
 use super::ServiceManager;
 use crate::error::{BridgeError, Result};
 use std::env;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 
@@ -103,6 +104,8 @@ pub fn install(serial_port: Option<&str>, udp_port: u16) -> Result<()> {
         .map(|p| format!("--port {}", p))
         .unwrap_or_default();
 
+    let udp_arg = format!("--udp-port {}", udp_port);
+
     let service_content = format!(
         r#"[Unit]
 Description=Open Control Bridge
@@ -110,7 +113,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart={exe} --daemon {port_arg}
+ExecStart={exe} --daemon {port_arg} {udp_arg}
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -119,7 +122,8 @@ StandardError=journal
 [Install]
 WantedBy=default.target
 "#,
-        exe = exe_path.display()
+        exe = exe_path.display(),
+        udp_arg = udp_arg
     );
 
     std::fs::write(&service_file, service_content).map_err(map_io_err)?;
@@ -156,9 +160,44 @@ fn ensure_serial_access() -> Result<()> {
     let groups = String::from_utf8_lossy(&groups_output.stdout);
     let needs_dialout = !groups.contains("dialout");
 
-    // Check if udev rule exists
-    let rule_path = "/etc/udev/rules.d/49-oc-bridge.rules";
-    let needs_udev = !Path::new(rule_path).exists();
+    // Determine whether we need to install udev rules.
+    //
+    // The device preset drives both the rules content and the filename
+    // (e.g. Teensy uses "00-teensy.rules"). If the target filename already
+    // exists with different content, we overwrite it.
+    let cfg = crate::config::load();
+    let device_config = cfg
+        .bridge
+        .device_preset
+        .as_ref()
+        .and_then(|name| crate::config::load_device_preset(name).ok());
+
+    let default_rules_file = "/etc/udev/rules.d/49-oc-bridge.rules";
+    let rules_file = device_config
+        .as_ref()
+        .and_then(|d| d.udev_rules_filename.as_deref())
+        .map(|filename| format!("/etc/udev/rules.d/{}", filename))
+        .unwrap_or_else(|| default_rules_file.to_string());
+
+    let desired_rules = device_config.as_ref().map(|dev| {
+        if let Some(ref custom_rules) = dev.udev_rules {
+            custom_rules.trim().to_string()
+        } else {
+            let vid = format!("{:04x}", dev.vid);
+            format!(
+                "# OC Bridge - {}\nSUBSYSTEM==\"usb\", ATTR{{idVendor}}==\"{vid}\", MODE=\"0666\"\nSUBSYSTEM==\"tty\", ATTRS{{idVendor}}==\"{vid}\", MODE=\"0666\"",
+                dev.name
+            )
+        }
+    });
+
+    let needs_udev = match desired_rules.as_deref() {
+        None => false,
+        Some(desired) => match fs::read_to_string(&rules_file) {
+            Ok(existing) => existing.trim_end() != desired.trim_end(),
+            Err(_) => true,
+        },
+    };
 
     // If either is needed, run a single pkexec command
     if needs_dialout || needs_udev {
@@ -169,38 +208,18 @@ fn ensure_serial_access() -> Result<()> {
         }
 
         if needs_udev {
-            // Load device preset to get udev rules
-            let cfg = crate::config::load();
-            let device_config = cfg
-                .bridge
-                .device_preset
-                .as_ref()
-                .and_then(|name| crate::config::load_device_preset(name).ok());
-
-            // Get rules from device preset
-            let Some(ref dev) = device_config else {
-                // No preset configured - skip udev rules
-                // User must configure a device preset for udev rules
+            let Some(rules_content) = desired_rules.as_ref() else {
+                // Shouldn't happen: needs_udev implies desired_rules exists.
                 return Ok(());
-            };
-
-            let rules_content = if let Some(ref custom_rules) = dev.udev_rules {
-                // Use custom rules from preset
-                custom_rules.trim().to_string()
-            } else {
-                // Generate simple rules from VID
-                let vid = format!("{:04x}", dev.vid);
-                format!(
-                    "# OC Bridge - {}\nSUBSYSTEM==\"usb\", ATTR{{idVendor}}==\"{vid}\", MODE=\"0666\"\nSUBSYSTEM==\"tty\", ATTRS{{idVendor}}==\"{vid}\", MODE=\"0666\"",
-                    dev.name
-                )
             };
 
             // Write rules to file
             let escaped_rules = rules_content.replace('\'', "'\\''");
             script.push_str(&format!(
-                "printf '%s\\n' '{}' > /etc/udev/rules.d/49-oc-bridge.rules && udevadm control --reload-rules && udevadm trigger",
+                "printf '%s\\n' '{}' > '{}' && udevadm control --reload-rules && udevadm trigger",
                 escaped_rules.replace('\n', "' '")
+                ,
+                rules_file
             ));
         }
 

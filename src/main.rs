@@ -58,7 +58,7 @@ fn main() -> Result<()> {
     if cli.daemon {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| error::BridgeError::Runtime { source: e })?;
-        return rt.block_on(run_daemon(cli.verbose));
+        return rt.block_on(run_daemon(cli.verbose, cli.port, cli.udp_port));
     }
 
     // Handle headless mode (UDP/WS for dev)
@@ -105,8 +105,16 @@ async fn run_tui() -> Result<()> {
 ///
 /// Designed for systemd service - reads config from default.toml
 /// and uses Serial transport for Teensy hardware.
-async fn run_daemon(verbose: bool) -> Result<()> {
-    let cfg = config::load();
+async fn run_daemon(verbose: bool, port: Option<String>, udp_port: Option<u16>) -> Result<()> {
+    let mut cfg = config::load();
+
+    // Apply CLI overrides (useful for systemd unit files)
+    if let Some(port) = port {
+        cfg.bridge.serial_port = port;
+    }
+    if let Some(udp_port) = udp_port {
+        cfg.bridge.host_udp_port = udp_port;
+    }
 
     // Print startup info
     let controller_info = match cfg.bridge.controller_transport {
@@ -143,9 +151,20 @@ async fn run_daemon(verbose: bool) -> Result<()> {
         shutdown_clone.store(true, Ordering::SeqCst);
     });
 
+    // Create log broadcaster for daemon -> TUI (same behavior as Windows service)
+    let log_tx = logging::broadcast::create_log_broadcaster_with_port(cfg.bridge.log_broadcast_port);
+    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel(constants::CHANNEL_CAPACITY);
+
+    let log_tx_clone = log_tx.clone();
+    tokio::spawn(async move {
+        while let Some(entry) = tokio_rx.recv().await {
+            let _ = log_tx_clone.send(entry);
+        }
+    });
+
     // Run bridge with config
     let stats = Arc::new(Stats::new());
-    bridge::run_with_shutdown(&cfg.bridge, shutdown, stats, None).await
+    bridge::run_with_shutdown(&cfg.bridge, shutdown, stats, Some(tokio_tx)).await
 }
 
 /// Run the bridge in headless mode (no TUI, logs to stdout)

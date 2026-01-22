@@ -4,19 +4,9 @@
 //! The service broadcasts on a UDP port, and the TUI listens to receive logs.
 
 use super::LogEntry;
-use crate::constants::DEFAULT_LOG_BROADCAST_PORT;
 use std::net::UdpSocket;
 use std::sync::mpsc;
 use std::thread;
-
-/// Create a log broadcast channel and spawn the broadcaster thread
-///
-/// Returns a sender that can be used to send LogEntry messages.
-/// The broadcaster runs in a background thread and sends JSON-encoded
-/// messages via UDP to localhost on the specified port.
-pub fn create_log_broadcaster() -> mpsc::Sender<LogEntry> {
-    create_log_broadcaster_with_port(DEFAULT_LOG_BROADCAST_PORT)
-}
 
 /// Create a log broadcast channel with a custom port
 pub fn create_log_broadcaster_with_port(port: u16) -> mpsc::Sender<LogEntry> {

@@ -50,38 +50,20 @@ pub fn set_thread_high_priority() {
     windows::set_thread_high_priority();
 }
 
-/// Run an action with elevated privileges
+/// Run an action with elevated privileges (Windows only)
 ///
-/// - Windows: Launches new process with UAC prompt (ShellExecuteW runas)
-/// - Other: Returns PlatformNotSupported error
+/// Launches a new process with a UAC prompt (ShellExecuteW runas).
+#[cfg(windows)]
 pub fn run_elevated_action(action: &str) -> Result<()> {
-    #[cfg(windows)]
-    {
-        windows::run_elevated_action(action)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = action;
-        Err(BridgeError::PlatformNotSupported {
-            feature: "elevation (use sudo)",
-        })
-    }
+    windows::run_elevated_action(action)
 }
 
-/// Check if current process is elevated (admin on Windows)
+/// Check if current process is elevated (Windows only)
 ///
-/// - Windows: Checks TOKEN_ELEVATION
-/// - Other platforms: Returns false (no equivalent concept for systemd user services)
+/// Checks TOKEN_ELEVATION.
+#[cfg(windows)]
 pub fn is_elevated() -> bool {
-    #[cfg(windows)]
-    {
-        windows::is_elevated()
-    }
-
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    windows::is_elevated()
 }
 
 // =============================================================================

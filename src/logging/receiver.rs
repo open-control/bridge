@@ -4,20 +4,12 @@
 //! Used in monitor mode when the TUI is observing a running service.
 
 use super::LogEntry;
-use crate::constants::{CHANNEL_CAPACITY, DEFAULT_LOG_BROADCAST_PORT};
+use crate::constants::CHANNEL_CAPACITY;
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-
-/// Spawn a UDP log receiver in the background
-///
-/// Returns a receiver channel for LogEntry messages.
-/// The receiver stops when the shutdown flag is set.
-pub fn spawn_log_receiver(shutdown: Arc<AtomicBool>) -> mpsc::Receiver<LogEntry> {
-    spawn_log_receiver_with_port(shutdown, DEFAULT_LOG_BROADCAST_PORT)
-}
 
 /// Spawn a UDP log receiver with a custom port
 pub fn spawn_log_receiver_with_port(

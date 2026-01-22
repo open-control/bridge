@@ -32,6 +32,12 @@ pub struct DeviceConfig {
     /// Linux udev rules (optional, multiline string)
     #[serde(default)]
     pub udev_rules: Option<String>,
+
+    /// Preferred udev rules filename (Linux)
+    ///
+    /// Example: "00-teensy.rules".
+    #[serde(default)]
+    pub udev_rules_filename: Option<String>,
 }
 
 /// Platform-specific port name hints for device detection fallback
