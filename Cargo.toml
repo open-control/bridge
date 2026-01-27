@@ -1,6 +1,6 @@
 [package]
 name = "open-control-bridge"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["miu-lab"]
 description = "Serial-to-UDP bridge for open-control framework"
