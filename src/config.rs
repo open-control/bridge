@@ -4,8 +4,8 @@
 //! Device presets are stored in `config/devices/*.toml`
 
 use crate::constants::{
-    DEFAULT_CONTROLLER_UDP_PORT, DEFAULT_CONTROLLER_WEBSOCKET_PORT, DEFAULT_HOST_UDP_PORT,
-    DEFAULT_HOST_WEBSOCKET_PORT, DEFAULT_LOG_BROADCAST_PORT,
+    DEFAULT_CONTROLLER_UDP_PORT, DEFAULT_CONTROLLER_WEBSOCKET_PORT, DEFAULT_CONTROL_PORT,
+    DEFAULT_HOST_UDP_PORT, DEFAULT_HOST_WEBSOCKET_PORT, DEFAULT_LOG_BROADCAST_PORT,
 };
 use crate::error::{BridgeError, Result};
 use serde::{Deserialize, Serialize};
@@ -189,6 +189,14 @@ pub struct BridgeConfig {
     // =========================================================================
     /// UDP port for log broadcast from service to TUI
     pub log_broadcast_port: u16,
+
+    // =========================================================================
+    // Control
+    // =========================================================================
+    /// TCP port for local control commands (pause/resume/status)
+    ///
+    /// Binds to 127.0.0.1 only.
+    pub control_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +230,9 @@ impl Default for BridgeConfig {
             host_websocket_port: DEFAULT_HOST_WEBSOCKET_PORT,
             // Logs
             log_broadcast_port: DEFAULT_LOG_BROADCAST_PORT,
+
+            // Control
+            control_port: DEFAULT_CONTROL_PORT,
         }
     }
 }
@@ -582,6 +593,7 @@ mod tests {
                 host_udp_port: 9101,
                 host_websocket_port: 9102,
                 log_broadcast_port: 9105,
+                control_port: 9106,
             },
             logs: LogsConfig {
                 max_entries: 500,

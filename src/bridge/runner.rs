@@ -10,6 +10,7 @@ use crate::config::{BridgeConfig, ControllerTransport, HostTransport};
 use crate::constants::{
     CHANNEL_CAPACITY, POST_DISCONNECT_DELAY_SECS, RECONNECT_DELAY_SECS, UDP_BUFFER_SIZE,
 };
+use crate::control::{ControlRuntime, ControlState, SerialRunState};
 use crate::error::Result;
 use crate::logging::{self, LogEntry};
 use crate::transport::{
@@ -19,7 +20,9 @@ use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 // =============================================================================
 // Main entry point
@@ -35,9 +38,32 @@ pub(super) async fn run(
     stats: Arc<Stats>,
     log_tx: Option<mpsc::Sender<LogEntry>>,
 ) -> Result<()> {
+    // Control plane (local IPC): pause/resume serial without stopping the process.
+    let (
+        control_state,
+        ControlRuntime {
+            desired_rx,
+            serial_open_tx,
+        },
+    ) = ControlState::new();
+    let control_port = config.control_port;
+    let shutdown_ctrl = shutdown.clone();
+    let log_tx_ctrl = log_tx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::control::run_server(control_port, control_state, shutdown_ctrl).await
+        {
+            logging::try_log(
+                &log_tx_ctrl,
+                LogEntry::system(format!("Control server error: {}", e)),
+                "control_server_error",
+            );
+        }
+    });
+
     match config.controller_transport {
         ControllerTransport::Serial => {
-            run_with_serial_controller(config, shutdown, stats, log_tx).await
+            run_with_serial_controller(config, shutdown, stats, log_tx, desired_rx, serial_open_tx)
+                .await
         }
         ControllerTransport::Udp => run_with_udp_controller(config, shutdown, stats, log_tx).await,
         ControllerTransport::WebSocket => {
@@ -59,6 +85,8 @@ async fn run_with_serial_controller(
     shutdown: Arc<AtomicBool>,
     stats: Arc<Stats>,
     log_tx: Option<mpsc::Sender<LogEntry>>,
+    mut pause_rx: watch::Receiver<SerialRunState>,
+    serial_open_tx: watch::Sender<bool>,
 ) -> Result<()> {
     // Load device preset if configured
     let device_config = config
@@ -66,8 +94,45 @@ async fn run_with_serial_controller(
         .as_ref()
         .and_then(|name| crate::config::load_device_preset(name).ok());
 
+    let _ = serial_open_tx.send_replace(false);
+
+    // Create host transport once and keep it alive across serial reconnects/pause.
+    let host_transport = create_host_transport(config, shutdown.clone(), &log_tx).await?;
+    let host_tx = host_transport.tx;
+
+    let (host_bcast_tx, _) = broadcast::channel::<Bytes>(CHANNEL_CAPACITY);
+    {
+        let mut host_rx = host_transport.rx;
+        let host_bcast_tx = host_bcast_tx.clone();
+        tokio::spawn(async move {
+            while let Some(data) = host_rx.recv().await {
+                let _ = host_bcast_tx.send(data);
+            }
+        });
+    }
+
     // Main reconnection loop
     while !shutdown.load(Ordering::Relaxed) {
+        // Pause gate: while paused, do not attempt reconnection.
+        if pause_rx.borrow().is_paused() {
+            logging::try_log(
+                &log_tx,
+                LogEntry::system("Serial paused (waiting for resume)"),
+                "serial_paused",
+            );
+        }
+        while pause_rx.borrow().is_paused() && !shutdown.load(Ordering::Relaxed) {
+            if pause_rx.changed().await.is_err() {
+                break;
+            }
+        }
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // We should not hold the serial port while paused.
+        let _ = serial_open_tx.send_replace(false);
+
         // Detect or use configured port
         let port_name = if config.serial_port.is_empty() {
             // Need device config for auto-detection
@@ -101,7 +166,10 @@ async fn run_with_serial_controller(
         };
 
         // Create controller transport
-        let controller = match SerialTransport::new(&port_name).spawn(shutdown.clone()) {
+        // Per-session shutdown: set on global shutdown OR pause.
+        let session_shutdown = Arc::new(AtomicBool::new(false));
+
+        let controller = match SerialTransport::new(&port_name).spawn(session_shutdown.clone()) {
             Ok(c) => c,
             Err(e) => {
                 logging::try_log(
@@ -114,8 +182,34 @@ async fn run_with_serial_controller(
             }
         };
 
-        // Create host transport
-        let host = create_host_transport(config, shutdown.clone(), &log_tx).await?;
+        let _ = serial_open_tx.send_replace(true);
+
+        // Create per-session host receiver (subscribe to persistent host transport).
+        let mut host_sub = host_bcast_tx.subscribe();
+        let (host_in_tx, host_in_rx) = mpsc::channel::<Bytes>(CHANNEL_CAPACITY);
+        {
+            let session_shutdown = session_shutdown.clone();
+            tokio::spawn(async move {
+                while !session_shutdown.load(Ordering::Relaxed) {
+                    let data = match host_sub.recv().await {
+                        Ok(d) => d,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    };
+
+                    match host_in_tx.try_send(data) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                    }
+                }
+            });
+        }
+
+        let host = TransportChannels {
+            rx: host_in_rx,
+            tx: host_tx.clone(),
+        };
 
         // Log connection info
         let host_info = format_host_transport_info(config);
@@ -134,11 +228,43 @@ async fn run_with_serial_controller(
             log_tx.clone(),
         );
 
-        let _ = session.run(shutdown.clone()).await;
+        // Run the session until:
+        // - transport disconnect
+        // - global shutdown
+        // - pause requested (release serial port)
+        {
+            let session_fut = session.run(session_shutdown.clone());
+            tokio::pin!(session_fut);
+            loop {
+                tokio::select! {
+                    _ = &mut session_fut => break,
+
+                _ = pause_rx.changed() => {
+                    if pause_rx.borrow().is_paused() {
+                        session_shutdown.store(true, Ordering::SeqCst);
+                    }
+                }
+
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if shutdown.load(Ordering::Relaxed) || pause_rx.borrow().is_paused() {
+                        session_shutdown.store(true, Ordering::SeqCst);
+                    }
+                }
+                }
+            }
+        }
+
+        // Session dropped: serial port should be released.
+        let _ = serial_open_tx.send_replace(false);
 
         // Check if this was a clean shutdown
         if shutdown.load(Ordering::Relaxed) {
             break;
+        }
+
+        // If paused, loop will now wait at the top until resumed.
+        if pause_rx.borrow().is_paused() {
+            continue;
         }
 
         // Connection lost, wait before retry

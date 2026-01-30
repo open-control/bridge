@@ -122,6 +122,27 @@ pub enum Command {
     /// Internal: uninstall service with elevation (Windows only)
     #[command(hide = true)]
     UninstallService,
+
+    /// Control a running bridge (pause/resume/status)
+    Ctl {
+        #[command(subcommand)]
+        cmd: CtlCommand,
+
+        /// Control port override (default from config)
+        #[arg(long)]
+        control_port: Option<u16>,
+    },
+}
+
+/// Control subcommands
+#[derive(Subcommand, Debug, Clone, Copy)]
+pub enum CtlCommand {
+    /// Temporarily release the serial port
+    Pause,
+    /// Resume serial connection
+    Resume,
+    /// Query current pause state
+    Status,
 }
 
 // =============================================================================

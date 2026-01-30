@@ -25,6 +25,13 @@ pub enum BridgeError {
         source: tokio_tungstenite::tungstenite::Error,
     },
 
+    /// Failed to bind control server port
+    ControlBind { port: u16, source: std::io::Error },
+    /// Failed to connect to control server
+    ControlConnect { port: u16, source: std::io::Error },
+    /// Control protocol error
+    ControlProtocol { message: String },
+
     // === Config ===
     /// Failed to read/write config file
     ConfigRead {
@@ -63,6 +70,8 @@ impl std::error::Error for BridgeError {
             Self::SerialOpen { source, .. }
             | Self::UdpBind { source, .. }
             | Self::WebSocketBind { source, .. }
+            | Self::ControlBind { source, .. }
+            | Self::ControlConnect { source, .. }
             | Self::ConfigRead { source, .. }
             | Self::ServiceCommand { source }
             | Self::Runtime { source } => Some(source),
@@ -79,6 +88,11 @@ impl fmt::Display for BridgeError {
             Self::UdpBind { port, .. } => write!(f, "Cannot bind UDP port {}", port),
             Self::WebSocketBind { port, .. } => write!(f, "Cannot bind WebSocket port {}", port),
             Self::WebSocketAccept { .. } => write!(f, "Failed to accept WebSocket connection"),
+            Self::ControlBind { port, .. } => write!(f, "Cannot bind control port {}", port),
+            Self::ControlConnect { port, .. } => {
+                write!(f, "Cannot connect to control port {}", port)
+            }
+            Self::ControlProtocol { message } => write!(f, "Control protocol error: {}", message),
             Self::ConfigRead { path, .. } => {
                 write!(f, "Cannot read config: {}", path.display())
             }

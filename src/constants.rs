@@ -45,6 +45,11 @@ pub const DEFAULT_HOST_WEBSOCKET_PORT: u16 = 8000;
 /// Default UDP port for log broadcasting (service -> TUI)
 pub const DEFAULT_LOG_BROADCAST_PORT: u16 = 9999;
 
+/// Default TCP control port for local IPC (pause/resume/status)
+///
+/// Convention: 7999 = control plane (local only)
+pub const DEFAULT_CONTROL_PORT: u16 = 7999;
+
 // =============================================================================
 // Timing - Service Operations
 // =============================================================================

@@ -217,8 +217,7 @@ fn ensure_serial_access() -> Result<()> {
             let escaped_rules = rules_content.replace('\'', "'\\''");
             script.push_str(&format!(
                 "printf '%s\\n' '{}' > '{}' && udevadm control --reload-rules && udevadm trigger",
-                escaped_rules.replace('\n', "' '")
-                ,
+                escaped_rules.replace('\n', "' '"),
                 rules_file
             ));
         }
