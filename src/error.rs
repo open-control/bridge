@@ -22,7 +22,7 @@ pub enum BridgeError {
     WebSocketBind { port: u16, source: std::io::Error },
     /// Failed to accept WebSocket connection
     WebSocketAccept {
-        source: tokio_tungstenite::tungstenite::Error,
+        source: Box<tokio_tungstenite::tungstenite::Error>,
     },
 
     /// Failed to bind control server port
@@ -75,7 +75,7 @@ impl std::error::Error for BridgeError {
             | Self::ConfigRead { source, .. }
             | Self::ServiceCommand { source }
             | Self::Runtime { source } => Some(source),
-            Self::WebSocketAccept { source } => Some(source),
+            Self::WebSocketAccept { source } => Some(source.as_ref()),
             _ => None,
         }
     }

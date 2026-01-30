@@ -70,6 +70,28 @@ oc-bridge --install-service
 oc-bridge --uninstall-service
 ```
 
+### Local Control (Pause/Resume)
+
+To allow firmware flashing without stopping the whole bridge process, `oc-bridge` exposes a
+minimal local control plane.
+
+- Binds to `127.0.0.1` only
+- Default port: `7999`
+
+```bash
+# Query status
+oc-bridge ctl status
+
+# Temporarily release the serial port
+oc-bridge ctl pause
+
+# Resume normal operation
+oc-bridge ctl resume
+
+# Override port
+oc-bridge ctl --control-port 7999 status
+```
+
 ## Configuration
 
 Config file: `config.toml` (next to executable)

@@ -196,7 +196,7 @@ async fn run_headless(
     let controller_transport = controller.unwrap_or_default();
 
     // Determine controller port (CLI override or default)
-    let ctrl_port = controller_port.unwrap_or_else(|| match controller_transport {
+    let ctrl_port = controller_port.unwrap_or(match controller_transport {
         ControllerArg::Websocket => DEFAULT_CONTROLLER_WEBSOCKET_PORT,
         ControllerArg::Udp => DEFAULT_CONTROLLER_UDP_PORT,
     });

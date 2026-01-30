@@ -198,7 +198,6 @@ impl Bridge {
                     *self = Self::Stopped {
                         serial_port: serial_port.take(),
                     };
-                    return;
                 }
             }
             Self::Monitoring {

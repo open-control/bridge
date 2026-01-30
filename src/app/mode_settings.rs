@@ -1,6 +1,6 @@
 //! Mode settings popup state and logic
 
-use crate::config::{ControllerTransport, HostTransport};
+use crate::config::{BridgeConfig, ControllerTransport, HostTransport};
 use crossterm::event::KeyCode;
 
 /// Action returned by handle_key for App to execute
@@ -76,25 +76,16 @@ pub struct ModeSettings {
 }
 
 impl ModeSettings {
-    pub fn new(
-        controller_transport: ControllerTransport,
-        device_preset: Option<String>,
-        available_presets: Vec<String>,
-        controller_udp_port: u16,
-        controller_websocket_port: u16,
-        host_transport: HostTransport,
-        host_udp_port: u16,
-        host_websocket_port: u16,
-    ) -> Self {
+    pub fn new(config: &BridgeConfig, available_presets: Vec<String>) -> Self {
         Self {
-            controller_transport,
-            device_preset,
+            controller_transport: config.controller_transport,
+            device_preset: config.device_preset.clone(),
             available_presets,
-            controller_udp_port,
-            controller_websocket_port,
-            host_transport,
-            host_udp_port,
-            host_websocket_port,
+            controller_udp_port: config.controller_udp_port,
+            controller_websocket_port: config.controller_websocket_port,
+            host_transport: config.host_transport,
+            host_udp_port: config.host_udp_port,
+            host_websocket_port: config.host_websocket_port,
             selected_field: ModeField::ControllerTransport,
             editing: false,
             input_buffer: String::new(),

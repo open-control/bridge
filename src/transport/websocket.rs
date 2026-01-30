@@ -162,7 +162,9 @@ async fn handle_websocket_client(
 ) -> Result<()> {
     let ws_stream = accept_async(stream)
         .await
-        .map_err(|e| BridgeError::WebSocketAccept { source: e })?;
+        .map_err(|e| BridgeError::WebSocketAccept {
+            source: Box::new(e),
+        })?;
 
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
@@ -174,7 +176,7 @@ async fn handle_websocket_client(
             match tokio::time::timeout(Duration::from_millis(100), ws_stream.next()).await {
                 Ok(Some(Ok(msg))) => {
                     if let Message::Binary(data) = msg {
-                        if in_tx_clone.send(Bytes::from(data)).await.is_err() {
+                        if in_tx_clone.send(data).await.is_err() {
                             break; // Channel closed
                         }
                     }

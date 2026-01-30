@@ -16,14 +16,8 @@ impl App {
     /// Open mode settings popup
     pub fn open_mode_settings(&mut self) {
         self.mode_popup = Some(ModeSettings::new(
-            self.config.bridge.controller_transport,
-            self.config.bridge.device_preset.clone(),
+            &self.config.bridge,
             list_device_presets(),
-            self.config.bridge.controller_udp_port,
-            self.config.bridge.controller_websocket_port,
-            self.config.bridge.host_transport,
-            self.config.bridge.host_udp_port,
-            self.config.bridge.host_websocket_port,
         ));
     }
 
