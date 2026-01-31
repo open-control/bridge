@@ -300,7 +300,7 @@ pub fn start() -> Result<()> {
         .map_err(map_io_err)?;
     if !status.success() {
         return Err(BridgeError::ServiceCommand {
-            source: std::io::Error::new(std::io::ErrorKind::Other, "failed to start service"),
+            source: std::io::Error::other("failed to start service"),
         });
     }
     Ok(())
