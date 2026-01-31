@@ -43,6 +43,7 @@ pub enum BridgeError {
 
     // === Service ===
     /// Permission denied for service operation
+    #[allow(dead_code)]
     ServicePermission { action: &'static str },
     /// Service command failed
     ServiceCommand { source: std::io::Error },
