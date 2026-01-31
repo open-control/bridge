@@ -43,7 +43,7 @@ pub enum BridgeError {
 
     // === Service ===
     /// Permission denied for service operation
-    #[allow(dead_code)]
+    #[cfg(any(windows, target_os = "linux"))]
     ServicePermission { action: &'static str },
     /// Service command failed
     ServiceCommand { source: std::io::Error },
@@ -100,9 +100,8 @@ impl fmt::Display for BridgeError {
             Self::ConfigValidation { field, reason } => {
                 write!(f, "Invalid {}: {}", field, reason)
             }
-            Self::ServicePermission { action } => {
-                write!(f, "Permission denied for: {}", action)
-            }
+            #[cfg(any(windows, target_os = "linux"))]
+            Self::ServicePermission { action } => write!(f, "Permission denied for: {}", action),
             Self::ServiceCommand { source } => write!(f, "Service command failed: {}", source),
             Self::NoDeviceFound => write!(f, "No device found"),
             Self::MultipleDevicesFound { count } => {
