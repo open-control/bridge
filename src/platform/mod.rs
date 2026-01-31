@@ -180,9 +180,9 @@ pub fn relaunch_in_terminal() -> Result<()> {
             }
         }
 
-        return Err(BridgeError::PlatformNotSupported {
+        Err(BridgeError::PlatformNotSupported {
             feature: "terminal emulator (install xdg-terminal-exec or run from terminal)",
-        });
+        })
     }
 
     #[cfg(windows)]
