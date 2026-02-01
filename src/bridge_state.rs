@@ -44,8 +44,8 @@ pub struct ServiceStatusCache {
 impl ServiceStatusCache {
     pub fn new() -> Self {
         Self {
-            installed: service::is_installed().unwrap_or(false),
-            running: service::is_running().unwrap_or(false),
+            installed: service::is_installed(None).unwrap_or(false),
+            running: service::is_running(None).unwrap_or(false),
             poll_counter: 0,
         }
     }
@@ -67,16 +67,16 @@ impl ServiceStatusCache {
         self.poll_counter += 1;
         if self.poll_counter >= SERVICE_STATUS_POLL_INTERVAL {
             self.poll_counter = 0;
-            self.installed = service::is_installed().unwrap_or(false);
-            self.running = service::is_running().unwrap_or(false);
+            self.installed = service::is_installed(None).unwrap_or(false);
+            self.running = service::is_running(None).unwrap_or(false);
         }
     }
 
     /// Force immediate refresh (after service operations)
     pub fn refresh(&mut self) {
         self.poll_counter = 0;
-        self.installed = service::is_installed().unwrap_or(false);
-        self.running = service::is_running().unwrap_or(false);
+        self.installed = service::is_installed(None).unwrap_or(false);
+        self.running = service::is_running(None).unwrap_or(false);
     }
 }
 
@@ -260,9 +260,9 @@ impl Bridge {
     /// Install service (handles elevation internally)
     pub fn install_service(cfg: &Config, logs: &mut LogStore) {
         // If service already installed, just start it
-        if service::is_installed().unwrap_or(false) {
+        if service::is_installed(None).unwrap_or(false) {
             logs.add(LogEntry::system("Service already installed, starting..."));
-            match service::start() {
+            match service::start(None) {
                 Ok(_) => logs.add(LogEntry::system("Service started")),
                 Err(e) => logs.add(LogEntry::system(format!("Start failed: {}", e))),
             }
@@ -272,7 +272,7 @@ impl Bridge {
         logs.add(LogEntry::system("Installing service..."));
 
         // service::install() handles elevation internally
-        match service::install(None, cfg.bridge.host_udp_port) {
+        match service::install(None, cfg.bridge.host_udp_port, None, None, false) {
             Ok(_) => logs.add(LogEntry::system("Service installed")),
             Err(e) => logs.add(LogEntry::system(format!("Install failed: {}", e))),
         }
@@ -283,7 +283,7 @@ impl Bridge {
         logs.add(LogEntry::system("Uninstalling service..."));
 
         // service::uninstall() handles elevation internally
-        match service::uninstall() {
+        match service::uninstall(None) {
             Ok(_) => logs.add(LogEntry::system("Service uninstalled")),
             Err(e) => logs.add(LogEntry::system(format!("Uninstall failed: {}", e))),
         }

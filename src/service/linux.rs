@@ -1,14 +1,11 @@
 //! Linux service implementation using systemd user service
 
-use super::ServiceManager;
+use super::{ServiceInstallOptions, ServiceManager};
 use crate::error::{BridgeError, Result};
 use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-
-const SERVICE_NAME: &str = "open-control-bridge";
-const DESKTOP_NAME: &str = "open-control-bridge";
 
 // =============================================================================
 // ServiceManager trait implementation
@@ -18,28 +15,33 @@ const DESKTOP_NAME: &str = "open-control-bridge";
 pub struct LinuxService;
 
 impl ServiceManager for LinuxService {
-    fn is_installed(&self) -> Result<bool> {
-        is_installed()
+    fn is_installed(&self, service_name: &str) -> Result<bool> {
+        is_installed(service_name)
     }
 
-    fn is_running(&self) -> Result<bool> {
-        is_running()
+    fn is_running(&self, service_name: &str) -> Result<bool> {
+        is_running(service_name)
     }
 
-    fn install(&self, serial_port: Option<&str>, udp_port: u16) -> Result<()> {
-        install(serial_port, udp_port)
+    fn install(
+        &self,
+        serial_port: Option<&str>,
+        udp_port: u16,
+        opts: &ServiceInstallOptions,
+    ) -> Result<()> {
+        install(serial_port, udp_port, opts)
     }
 
-    fn uninstall(&self) -> Result<()> {
-        uninstall()
+    fn uninstall(&self, service_name: &str) -> Result<()> {
+        uninstall(service_name)
     }
 
-    fn start(&self) -> Result<()> {
-        start()
+    fn start(&self, service_name: &str) -> Result<()> {
+        start(service_name)
     }
 
-    fn stop(&self) -> Result<()> {
-        stop()
+    fn stop(&self, service_name: &str) -> Result<()> {
+        stop(service_name)
     }
 }
 
@@ -60,43 +62,59 @@ fn map_env_err(_: env::VarError) -> BridgeError {
     }
 }
 
-fn service_file_path() -> Result<String> {
+fn service_file_path(service_name: &str) -> Result<String> {
     let home = env::var("HOME").map_err(map_env_err)?;
     Ok(format!(
         "{}/.config/systemd/user/{}.service",
-        home, SERVICE_NAME
+        home, service_name
     ))
 }
 
-fn desktop_file_path() -> Result<String> {
+fn desktop_file_path(desktop_name: &str) -> Result<String> {
     let home = env::var("HOME").map_err(map_env_err)?;
     Ok(format!(
         "{}/.local/share/applications/{}.desktop",
-        home, DESKTOP_NAME
+        home, desktop_name
     ))
 }
 
-pub fn is_installed() -> Result<bool> {
-    let service_file = service_file_path()?;
+pub fn is_installed(service_name: &str) -> Result<bool> {
+    let service_file = service_file_path(service_name)?;
     Ok(Path::new(&service_file).exists())
 }
 
-pub fn is_running() -> Result<bool> {
+pub fn is_running(service_name: &str) -> Result<bool> {
     let output = Command::new("systemctl")
-        .args(["--user", "is-active", SERVICE_NAME])
+        .args(["--user", "is-active", service_name])
         .output()
         .map_err(map_io_err)?;
     Ok(output.status.success())
 }
 
-pub fn install(serial_port: Option<&str>, udp_port: u16) -> Result<()> {
+fn quote_exec(path: &Path) -> String {
+    let s = path.to_string_lossy().to_string();
+    if s.contains(' ') {
+        format!("\"{}\"", s.replace('"', "\\\""))
+    } else {
+        s
+    }
+}
+
+pub fn install(
+    serial_port: Option<&str>,
+    udp_port: u16,
+    opts: &ServiceInstallOptions,
+) -> Result<()> {
     // First, ensure user has serial port access
     ensure_serial_access()?;
 
-    let exe_path = env::current_exe().map_err(map_io_err)?;
+    let exe_path = match &opts.exec {
+        Some(p) => p.clone(),
+        None => env::current_exe().map_err(map_io_err)?,
+    };
     let home = env::var("HOME").map_err(map_env_err)?;
     let service_dir = format!("{}/.config/systemd/user", home);
-    let service_file = service_file_path()?;
+    let service_file = service_file_path(&opts.name)?;
 
     std::fs::create_dir_all(&service_dir).map_err(map_io_err)?;
 
@@ -122,24 +140,26 @@ StandardError=journal
 [Install]
 WantedBy=default.target
 "#,
-        exe = exe_path.display(),
+        exe = quote_exec(&exe_path),
         udp_arg = udp_arg
     );
 
     std::fs::write(&service_file, service_content).map_err(map_io_err)?;
 
-    // Create .desktop file for launching from desktop
-    install_desktop_file(&exe_path)?;
+    // Create .desktop file for launching from desktop (optional)
+    if !opts.no_desktop_file {
+        install_desktop_file(&exe_path, &opts.name)?;
+    }
 
     Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .status()
         .map_err(map_io_err)?;
     Command::new("systemctl")
-        .args(["--user", "enable", SERVICE_NAME])
+        .args(["--user", "enable", &opts.name])
         .status()
         .map_err(map_io_err)?;
-    start()?;
+    start(&opts.name)?;
 
     Ok(())
 }
@@ -238,10 +258,10 @@ fn ensure_serial_access() -> Result<()> {
 }
 
 /// Install a .desktop file for launching from the desktop
-fn install_desktop_file(exe_path: &Path) -> Result<()> {
+fn install_desktop_file(exe_path: &Path, desktop_name: &str) -> Result<()> {
     let home = env::var("HOME").map_err(map_env_err)?;
     let apps_dir = format!("{}/.local/share/applications", home);
-    let desktop_file = desktop_file_path()?;
+    let desktop_file = desktop_file_path(desktop_name)?;
 
     std::fs::create_dir_all(&apps_dir).map_err(map_io_err)?;
 
@@ -256,7 +276,7 @@ Type=Application
 Categories=Development;Utility;
 Keywords=serial;bridge;midi;controller;
 "#,
-        exe = exe_path.display()
+        exe = quote_exec(exe_path)
     );
 
     std::fs::write(&desktop_file, desktop_content).map_err(map_io_err)?;
@@ -269,20 +289,20 @@ Keywords=serial;bridge;midi;controller;
     Ok(())
 }
 
-pub fn uninstall() -> Result<()> {
-    let _ = stop();
+pub fn uninstall(service_name: &str) -> Result<()> {
+    let _ = stop(service_name);
     Command::new("systemctl")
-        .args(["--user", "disable", SERVICE_NAME])
+        .args(["--user", "disable", service_name])
         .status()
         .map_err(map_io_err)?;
 
-    let service_file = service_file_path()?;
+    let service_file = service_file_path(service_name)?;
     if Path::new(&service_file).exists() {
         std::fs::remove_file(&service_file).map_err(map_io_err)?;
     }
 
     // Remove .desktop file
-    if let Ok(desktop_file) = desktop_file_path() {
+    if let Ok(desktop_file) = desktop_file_path(service_name) {
         let _ = std::fs::remove_file(&desktop_file);
     }
 
@@ -293,9 +313,9 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
-pub fn start() -> Result<()> {
+pub fn start(service_name: &str) -> Result<()> {
     let status = Command::new("systemctl")
-        .args(["--user", "start", SERVICE_NAME])
+        .args(["--user", "start", service_name])
         .status()
         .map_err(map_io_err)?;
     if !status.success() {
@@ -306,9 +326,9 @@ pub fn start() -> Result<()> {
     Ok(())
 }
 
-pub fn stop() -> Result<()> {
+pub fn stop(service_name: &str) -> Result<()> {
     Command::new("systemctl")
-        .args(["--user", "stop", SERVICE_NAME])
+        .args(["--user", "stop", service_name])
         .status()
         .map_err(map_io_err)?;
     Ok(())

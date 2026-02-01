@@ -2,7 +2,8 @@
 //!
 //! Provides structured argument parsing with automatic help generation.
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 // =============================================================================
 // Controller Transport CLI Argument
@@ -76,22 +77,46 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
+#[derive(Args, Debug)]
+pub(crate) struct ServiceInstallArgs {
+    /// Serial port to use
+    #[arg(long, value_name = "PORT")]
+    pub(crate) port: Option<String>,
+
+    /// UDP port for host communication
+    #[arg(long, value_name = "PORT", default_value_t = 9000)]
+    pub(crate) udp_port: u16,
+
+    /// Service name to install/manage (Windows/Linux only)
+    #[arg(long, value_name = "NAME")]
+    pub(crate) service_name: Option<String>,
+
+    /// Absolute path to the oc-bridge executable used by the service/unit (Windows/Linux only)
+    ///
+    /// This should point to a stable path (e.g. a `current/` symlink target) so upgrades stay atomic.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) service_exec: Option<PathBuf>,
+
+    /// Linux only: do not install a .desktop launcher
+    #[arg(long)]
+    pub(crate) no_desktop_file: bool,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ServiceNameArgs {
+    /// Service name to uninstall (Windows/Linux only)
+    #[arg(long, value_name = "NAME")]
+    pub(crate) service_name: Option<String>,
+}
+
 /// Subcommands for service management
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Install and start as system service (requires elevation on Windows)
-    Install {
-        /// Serial port to use
-        #[arg(long, value_name = "PORT")]
-        port: Option<String>,
-
-        /// UDP port for host communication
-        #[arg(long, value_name = "PORT", default_value_t = 9000)]
-        udp_port: u16,
-    },
+    Install(ServiceInstallArgs),
 
     /// Uninstall system service (requires elevation on Windows)
-    Uninstall,
+    Uninstall(ServiceNameArgs),
 
     /// Run as system service (internal, called by service manager)
     ///
@@ -112,16 +137,11 @@ pub enum Command {
 
     /// Internal: install service with elevation (Windows only)
     #[command(hide = true)]
-    InstallService {
-        #[arg(long)]
-        port: Option<String>,
-        #[arg(long, default_value_t = 9000)]
-        udp_port: u16,
-    },
+    InstallService(ServiceInstallArgs),
 
     /// Internal: uninstall service with elevation (Windows only)
     #[command(hide = true)]
-    UninstallService,
+    UninstallService(ServiceNameArgs),
 
     /// Control a running bridge (pause/resume/status)
     Ctl {
@@ -225,9 +245,12 @@ mod tests {
             "9001",
         ]);
         match cli.command {
-            Some(Command::Install { port, udp_port }) => {
-                assert_eq!(port, Some("COM3".to_string()));
-                assert_eq!(udp_port, 9001);
+            Some(Command::Install(args)) => {
+                assert_eq!(args.port, Some("COM3".to_string()));
+                assert_eq!(args.udp_port, 9001);
+                assert!(args.service_name.is_none());
+                assert!(args.service_exec.is_none());
+                assert!(!args.no_desktop_file);
             }
             _ => panic!("Expected Install command"),
         }
@@ -236,6 +259,9 @@ mod tests {
     #[test]
     fn test_cli_parse_uninstall() {
         let cli = Cli::parse_from(["oc-bridge", "uninstall"]);
-        assert!(matches!(cli.command, Some(Command::Uninstall)));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Uninstall(ServiceNameArgs { service_name: None }))
+        ));
     }
 }
