@@ -56,6 +56,7 @@ pub trait ServiceManager {
     fn stop(&self, service_name: &str) -> Result<()>;
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[derive(Debug, Clone)]
 pub struct ServiceInstallOptions {
     pub name: String,
@@ -63,6 +64,10 @@ pub struct ServiceInstallOptions {
     #[cfg(target_os = "linux")]
     pub no_desktop_file: bool,
 }
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[derive(Debug, Clone)]
+pub struct ServiceInstallOptions;
 
 // ============================================================================
 // Unsupported platform fallback
@@ -212,25 +217,40 @@ pub fn install(
     service_exec: Option<&Path>,
     no_desktop_file: bool,
 ) -> Result<()> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
-        if no_desktop_file {
-            return Err(crate::error::BridgeError::ConfigValidation {
-                field: "no-desktop-file",
-                reason: "only supported on Linux".to_string(),
-            });
-        }
+        let _ = (
+            serial_port,
+            udp_port,
+            service_name,
+            service_exec,
+            no_desktop_file,
+        );
+        return Err(crate::error::BridgeError::PlatformNotSupported { feature: "service" });
     }
 
-    let name = resolve_service_name(service_name)?;
-    let exec = resolve_service_exec(service_exec)?;
-    let opts = ServiceInstallOptions {
-        name,
-        exec,
-        #[cfg(target_os = "linux")]
-        no_desktop_file,
-    };
-    service().install(serial_port, udp_port, &opts)
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        #[cfg(not(target_os = "linux"))]
+        {
+            if no_desktop_file {
+                return Err(crate::error::BridgeError::ConfigValidation {
+                    field: "no-desktop-file",
+                    reason: "only supported on Linux".to_string(),
+                });
+            }
+        }
+
+        let name = resolve_service_name(service_name)?;
+        let exec = resolve_service_exec(service_exec)?;
+        let opts = ServiceInstallOptions {
+            name,
+            exec,
+            #[cfg(target_os = "linux")]
+            no_desktop_file,
+        };
+        service().install(serial_port, udp_port, &opts)
+    }
 }
 
 /// Uninstall the service
