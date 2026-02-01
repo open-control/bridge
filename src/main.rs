@@ -88,14 +88,26 @@ fn main() -> Result<()> {
     // Handle subcommands
     match cli.command {
         // Service management (user-facing)
-        Some(Command::Install { port, udp_port }) => service::install(port.as_deref(), udp_port),
-        Some(Command::Uninstall) => service::uninstall(),
+        Some(Command::Install(args)) => service::install(
+            args.port.as_deref(),
+            args.udp_port,
+            args.service_name.as_deref(),
+            args.service_exec.as_deref(),
+            args.no_desktop_file,
+        ),
+        Some(Command::Uninstall(args)) => service::uninstall(args.service_name.as_deref()),
 
         // Internal elevated commands (used by elevation mechanism)
-        Some(Command::InstallService { port, udp_port }) => {
-            service::install_elevated(port.as_deref(), udp_port)
+        Some(Command::InstallService(args)) => service::install_elevated(
+            args.port.as_deref(),
+            args.udp_port,
+            args.service_name.as_deref(),
+            args.service_exec.as_deref(),
+            args.no_desktop_file,
+        ),
+        Some(Command::UninstallService(args)) => {
+            service::uninstall_elevated(args.service_name.as_deref())
         }
-        Some(Command::UninstallService) => service::uninstall_elevated(),
 
         Some(Command::Ctl { .. }) => unreachable!(),
 

@@ -19,7 +19,6 @@ use windows::Win32::System::Services::{
     SERVICE_STOP, SERVICE_WIN32_OWN_PROCESS,
 };
 
-const SERVICE_NAME: &str = "OpenControlBridge";
 const SERVICE_DISPLAY_NAME: &str = "Open Control Bridge";
 const SERVICE_DESCRIPTION: &str = "Serial-to-UDP bridge for open-control framework";
 
@@ -75,34 +74,39 @@ impl Drop for ScHandle {
 // ServiceManager trait implementation
 // =============================================================================
 
-use super::ServiceManager;
+use super::{ServiceInstallOptions, ServiceManager};
 
 /// Windows service manager (unit struct, stateless)
 pub struct WindowsService;
 
 impl ServiceManager for WindowsService {
-    fn is_installed(&self) -> Result<bool> {
-        is_installed()
+    fn is_installed(&self, service_name: &str) -> Result<bool> {
+        is_installed(service_name)
     }
 
-    fn is_running(&self) -> Result<bool> {
-        is_running()
+    fn is_running(&self, service_name: &str) -> Result<bool> {
+        is_running(service_name)
     }
 
-    fn install(&self, serial_port: Option<&str>, udp_port: u16) -> Result<()> {
-        install(serial_port, udp_port)
+    fn install(
+        &self,
+        serial_port: Option<&str>,
+        udp_port: u16,
+        opts: &ServiceInstallOptions,
+    ) -> Result<()> {
+        install(serial_port, udp_port, opts)
     }
 
-    fn uninstall(&self) -> Result<()> {
-        uninstall()
+    fn uninstall(&self, service_name: &str) -> Result<()> {
+        uninstall(service_name)
     }
 
-    fn start(&self) -> Result<()> {
-        start()
+    fn start(&self, service_name: &str) -> Result<()> {
+        start(service_name)
     }
 
-    fn stop(&self) -> Result<()> {
-        stop()
+    fn stop(&self, service_name: &str) -> Result<()> {
+        stop(service_name)
     }
 }
 
@@ -111,8 +115,8 @@ impl ServiceManager for WindowsService {
 // =============================================================================
 
 /// Check if service is installed
-pub fn is_installed() -> Result<bool> {
-    let name = to_wide(SERVICE_NAME);
+pub fn is_installed(service_name: &str) -> Result<bool> {
+    let name = to_wide(service_name);
 
     unsafe {
         let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
@@ -136,8 +140,8 @@ pub fn is_installed() -> Result<bool> {
 }
 
 /// Check if service is running
-pub fn is_running() -> Result<bool> {
-    let name = to_wide(SERVICE_NAME);
+pub fn is_running(service_name: &str) -> Result<bool> {
+    let name = to_wide(service_name);
 
     unsafe {
         let scm = match OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) {
@@ -169,19 +173,35 @@ pub fn is_running() -> Result<bool> {
 /// Handles elevation automatically:
 /// - If already elevated: performs SCM installation directly
 /// - If not elevated: launches elevated process via UAC
-pub fn install(serial_port: Option<&str>, udp_port: u16) -> Result<()> {
+pub fn install(
+    serial_port: Option<&str>,
+    udp_port: u16,
+    opts: &ServiceInstallOptions,
+) -> Result<()> {
     // Check elevation first - if not elevated, launch elevated process
     if !crate::platform::is_elevated() {
         let mut args = format!("install-service --udp-port {}", udp_port);
         if let Some(port) = serial_port {
-            args = format!("install-service --port {} --udp-port {}", port, udp_port);
+            args.push_str(&format!(" --port {}", port));
+        }
+        args.push_str(&format!(" --service-name {}", &opts.name));
+        if let Some(exec) = &opts.exec {
+            let exec_str = exec.to_string_lossy().to_string();
+            let quoted = if exec_str.contains(' ') {
+                format!("\"{}\"", exec_str)
+            } else {
+                exec_str
+            };
+            args.push_str(&format!(" --service-exec {}", quoted));
         }
         return crate::platform::run_elevated_action(&args);
     }
 
     // Already elevated - proceed with installation
-    let exe_path =
-        std::env::current_exe().map_err(|e| BridgeError::ServiceCommand { source: e })?;
+    let exe_path = match &opts.exec {
+        Some(p) => p.clone(),
+        None => std::env::current_exe().map_err(|e| BridgeError::ServiceCommand { source: e })?,
+    };
 
     // Build command line with arguments
     let mut cmd = format!("\"{}\" service", exe_path.display());
@@ -190,7 +210,7 @@ pub fn install(serial_port: Option<&str>, udp_port: u16) -> Result<()> {
     }
     cmd.push_str(&format!(" --udp-port {}", udp_port));
 
-    let name = to_wide(SERVICE_NAME);
+    let name = to_wide(&opts.name);
     let display_name = to_wide(SERVICE_DISPLAY_NAME);
     let cmd_wide = to_wide(&cmd);
 
@@ -235,14 +255,14 @@ pub fn install(serial_port: Option<&str>, udp_port: u16) -> Result<()> {
 
     // Set description via sc.exe (simpler than ChangeServiceConfig2W)
     let _ = std::process::Command::new("sc")
-        .args(["description", SERVICE_NAME, SERVICE_DESCRIPTION])
+        .args(["description", &opts.name, SERVICE_DESCRIPTION])
         .output();
 
     // Start the service
-    start()?;
+    start(&opts.name)?;
 
     // Configure ACL to allow non-admin users to start/stop
-    let _ = configure_user_permissions();
+    let _ = configure_user_permissions(&opts.name);
 
     Ok(())
 }
@@ -252,17 +272,20 @@ pub fn install(serial_port: Option<&str>, udp_port: u16) -> Result<()> {
 /// Handles elevation automatically:
 /// - If already elevated: performs SCM uninstallation directly
 /// - If not elevated: launches elevated process via UAC
-pub fn uninstall() -> Result<()> {
+pub fn uninstall(service_name: &str) -> Result<()> {
     // Check elevation first - if not elevated, launch elevated process
     if !crate::platform::is_elevated() {
-        return crate::platform::run_elevated_action("uninstall-service");
+        return crate::platform::run_elevated_action(&format!(
+            "uninstall-service --service-name {}",
+            service_name
+        ));
     }
 
     // Already elevated - proceed with uninstallation
     // Stop first
-    let _ = stop();
+    let _ = stop(service_name);
 
-    let name = to_wide(SERVICE_NAME);
+    let name = to_wide(service_name);
 
     unsafe {
         let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
@@ -292,8 +315,8 @@ pub fn uninstall() -> Result<()> {
 }
 
 /// Start the service
-pub fn start() -> Result<()> {
-    let name = to_wide(SERVICE_NAME);
+pub fn start(service_name: &str) -> Result<()> {
+    let name = to_wide(service_name);
 
     unsafe {
         let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
@@ -323,8 +346,8 @@ pub fn start() -> Result<()> {
 }
 
 /// Stop the service
-pub fn stop() -> Result<()> {
-    let name = to_wide(SERVICE_NAME);
+pub fn stop(service_name: &str) -> Result<()> {
+    let name = to_wide(service_name);
 
     unsafe {
         let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
@@ -586,13 +609,13 @@ fn build_service_sddl() -> String {
 ///
 /// Sets a custom Security Descriptor (SDDL) on the service to allow
 /// interactive users to start and stop it without administrator privileges.
-pub fn configure_user_permissions() -> Result<()> {
+pub fn configure_user_permissions(service_name: &str) -> Result<()> {
     use std::process::Command;
 
     let sddl = build_service_sddl();
 
     let output = Command::new("sc")
-        .args(["sdset", SERVICE_NAME, &sddl])
+        .args(["sdset", service_name, &sddl])
         .output()
         .map_err(|e| BridgeError::ServiceCommand { source: e })?;
 

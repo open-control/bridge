@@ -335,7 +335,7 @@ impl App {
             self.logs.add(LogEntry::system(
                 "Stopping service to start local bridge...",
             ));
-            if let Err(e) = crate::service::stop() {
+            if let Err(e) = crate::service::stop(None) {
                 self.logs.add(LogEntry::system(format!(
                     "Warning: service stop failed: {}",
                     e
@@ -363,7 +363,7 @@ impl App {
         {
             self.bridge.stop(&self.config, &mut self.logs);
             self.logs.add(LogEntry::system("Restarting service..."));
-            if let Err(e) = crate::service::start() {
+            if let Err(e) = crate::service::start(None) {
                 self.logs.add(LogEntry::system(format!(
                     "Warning: service restart failed: {}",
                     e
@@ -408,7 +408,7 @@ impl App {
         if self.service_status.is_running() {
             // Stop service
             self.logs.add(LogEntry::system("Stopping service..."));
-            match crate::service::stop() {
+            match crate::service::stop(None) {
                 Ok(_) => self.logs.add(LogEntry::system("Service stopped")),
                 Err(e) => self
                     .logs
@@ -417,7 +417,7 @@ impl App {
         } else {
             // Start service
             self.logs.add(LogEntry::system("Starting service..."));
-            match crate::service::start() {
+            match crate::service::start(None) {
                 Ok(_) => {
                     self.logs.add(LogEntry::system("Service started"));
                     // Monitoring will be auto-started by poll() when service is detected
@@ -464,7 +464,7 @@ impl App {
         // Restart service if we had stopped it to run local
         if self.service_stopped_for_local && self.service_status.is_installed() {
             self.logs.add(LogEntry::system("Restarting service..."));
-            if let Err(e) = crate::service::start() {
+            if let Err(e) = crate::service::start(None) {
                 tracing::warn!("Failed to restart service on quit: {}", e);
             }
         }
