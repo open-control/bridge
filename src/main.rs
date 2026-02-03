@@ -252,7 +252,23 @@ async fn run_headless(
 
     // Run bridge
     let stats = Arc::new(Stats::new());
-    bridge::run_with_shutdown(&config, shutdown, stats, None).await
+
+    // Attach log receiver for headless mode (stdout)
+    let (log_tx, mut log_rx) =
+        tokio::sync::mpsc::channel::<logging::LogEntry>(constants::CHANNEL_CAPACITY);
+    tokio::spawn(async move {
+        while let Some(entry) = log_rx.recv().await {
+            match entry.kind {
+                logging::LogKind::System { message } => {
+                    println!("{} {}", entry.timestamp, message);
+                }
+                // Avoid spamming stdout in headless mode; protocol/debug logs are available in TUI.
+                _ => {}
+            }
+        }
+    });
+
+    bridge::run_with_shutdown(&config, shutdown, stats, Some(log_tx)).await
 }
 
 fn run_ctl(cmd: CtlCommand, control_port: u16) -> Result<()> {

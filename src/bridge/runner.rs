@@ -38,32 +38,41 @@ pub(super) async fn run(
     stats: Arc<Stats>,
     log_tx: Option<mpsc::Sender<LogEntry>>,
 ) -> Result<()> {
-    // Control plane (local IPC): pause/resume serial without stopping the process.
-    let (
-        control_state,
-        ControlRuntime {
-            desired_rx,
-            serial_open_tx,
-        },
-    ) = ControlState::new();
-    let control_port = config.control_port;
-    let shutdown_ctrl = shutdown.clone();
-    let log_tx_ctrl = log_tx.clone();
-    tokio::spawn(async move {
-        if let Err(e) = crate::control::run_server(control_port, control_state, shutdown_ctrl).await
-        {
-            logging::try_log(
-                &log_tx_ctrl,
-                LogEntry::system(format!("Control server error: {}", e)),
-                "control_server_error",
-            );
-        }
-    });
-
     match config.controller_transport {
         ControllerTransport::Serial => {
-            run_with_serial_controller(config, shutdown, stats, log_tx, desired_rx, serial_open_tx)
-                .await
+            // Control plane (local IPC): pause/resume serial without stopping the process.
+            // Only meaningful for Serial controller transport; avoid binding conflicts for headless UDP/WS.
+            let (
+                control_state,
+                ControlRuntime {
+                    desired_rx,
+                    serial_open_tx,
+                },
+            ) = ControlState::new();
+            let control_port = config.control_port;
+            let shutdown_ctrl = shutdown.clone();
+            let log_tx_ctrl = log_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    crate::control::run_server(control_port, control_state, shutdown_ctrl).await
+                {
+                    logging::try_log(
+                        &log_tx_ctrl,
+                        LogEntry::system(format!("Control server error: {}", e)),
+                        "control_server_error",
+                    );
+                }
+            });
+
+            run_with_serial_controller(
+                config,
+                shutdown,
+                stats,
+                log_tx,
+                desired_rx,
+                serial_open_tx,
+            )
+            .await
         }
         ControllerTransport::Udp => run_with_udp_controller(config, shutdown, stats, log_tx).await,
         ControllerTransport::WebSocket => {

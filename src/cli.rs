@@ -61,7 +61,7 @@ pub struct Cli {
     /// Controller port to listen on (requires --headless)
     ///
     /// Overrides default port for the controller transport.
-    /// Default: 8001 (WebSocket), 9001 (UDP)
+    /// Default: 8100 (WebSocket), 8000 (UDP)
     #[arg(long, requires = "headless")]
     pub controller_port: Option<u16>,
 

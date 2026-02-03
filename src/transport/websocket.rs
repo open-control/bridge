@@ -6,7 +6,7 @@
 //!
 //! Architecture:
 //! ```text
-//! Browser (WASM) ──WebSocket:9002──► oc-bridge ──Serial/UDP──► Device/DAW
+//! Browser (WASM) ──WebSocket:810x──► oc-bridge ──UDP:900x──► Host (e.g., Bitwig)
 //! ```
 
 use super::{Transport, TransportChannels};
@@ -32,7 +32,7 @@ use tracing::{debug, error, info, warn};
 /// # Example
 ///
 /// ```ignore
-/// let transport = WebSocketTransport::new(9002);
+/// let transport = WebSocketTransport::new(8100);
 /// let channels = transport.spawn(shutdown)?;
 ///
 /// // Data from WebSocket clients comes through channels.rx
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_websocket_transport_new() {
-        let transport = WebSocketTransport::new(9002);
-        assert_eq!(transport.port, 9002);
+        let transport = WebSocketTransport::new(8100);
+        assert_eq!(transport.port, 8100);
     }
 }
