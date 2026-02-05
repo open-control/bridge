@@ -38,51 +38,75 @@ pub(super) async fn run(
     stats: Arc<Stats>,
     log_tx: Option<mpsc::Sender<LogEntry>>,
 ) -> Result<()> {
+    // Control plane (local IPC): always available in daemon mode when control_port != 0.
+    // Serial pause/resume is only supported when controller transport is Serial.
+    let serial_supported = matches!(config.controller_transport, ControllerTransport::Serial);
+    let (
+        control_state,
+        ControlRuntime {
+            desired_rx,
+            serial_open_tx,
+        },
+    ) = ControlState::new(
+        shutdown.clone(),
+        crate::control::ControlInfo {
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            config_path: crate::config::config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "".to_string()),
+            host_udp_port: config.host_udp_port,
+            log_broadcast_port: config.log_broadcast_port,
+            control_port: config.control_port,
+            serial_supported,
+        },
+    );
+
+    // Keep the control watch sender alive for Serial mode even when the server
+    // is disabled (e.g., control_port = 0 in headless/dev configs). If the
+    // sender is dropped, `watch::Receiver::changed()` resolves immediately and
+    // the serial session loop can spin.
+    let control_keepalive = if serial_supported {
+        Some(control_state.clone())
+    } else {
+        None
+    };
+
+    if config.control_port != 0 {
+        let control_port = config.control_port;
+        let listener = crate::control::bind_listener(control_port).await?;
+        let shutdown_ctrl = shutdown.clone();
+        let log_tx_ctrl = log_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                crate::control::run_server_with_listener(listener, control_state, shutdown_ctrl)
+                    .await
+            {
+                logging::try_log(
+                    &log_tx_ctrl,
+                    LogEntry::system(format!("Control server error: {}", e)),
+                    "control_server_error",
+                );
+            }
+        });
+    }
+
     match config.controller_transport {
         ControllerTransport::Serial => {
-            // Control plane (local IPC): pause/resume serial without stopping the process.
-            // Only meaningful for Serial controller transport; avoid binding conflicts for headless UDP/WS.
-            let (
-                control_state,
-                ControlRuntime {
-                    desired_rx,
-                    serial_open_tx,
-                },
-            ) = ControlState::new(
-                shutdown.clone(),
-                crate::control::ControlInfo {
-                    pid: std::process::id(),
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                    config_path: crate::config::config_path()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| "".to_string()),
-                    host_udp_port: config.host_udp_port,
-                    log_broadcast_port: config.log_broadcast_port,
-                    control_port: config.control_port,
-                },
-            );
-            let control_port = config.control_port;
-            let listener = crate::control::bind_listener(control_port).await?;
-            let shutdown_ctrl = shutdown.clone();
-            let log_tx_ctrl = log_tx.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    crate::control::run_server_with_listener(listener, control_state, shutdown_ctrl)
-                        .await
-                {
-                    logging::try_log(
-                        &log_tx_ctrl,
-                        LogEntry::system(format!("Control server error: {}", e)),
-                        "control_server_error",
-                    );
-                }
-            });
-
+            let _keepalive = control_keepalive;
             run_with_serial_controller(config, shutdown, stats, log_tx, desired_rx, serial_open_tx)
                 .await
         }
-        ControllerTransport::Udp => run_with_udp_controller(config, shutdown, stats, log_tx).await,
+        ControllerTransport::Udp => {
+            drop(control_keepalive);
+            drop(desired_rx);
+            drop(serial_open_tx);
+            run_with_udp_controller(config, shutdown, stats, log_tx).await
+        }
         ControllerTransport::WebSocket => {
+            drop(control_keepalive);
+            drop(desired_rx);
+            drop(serial_open_tx);
             run_with_websocket_controller(config, shutdown, stats, log_tx).await
         }
     }

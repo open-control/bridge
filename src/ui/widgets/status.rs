@@ -46,7 +46,7 @@ impl Widget for StatusWidget<'_> {
         let title = if let Some(msg) = &self.state.status_message {
             format!(" OC BRIDGE │ {} ", msg)
         } else if self.state.bridge_paused {
-            " OC BRIDGE │ SERIAL PAUSED ".to_string()
+            " OC BRIDGE │ SERIAL RELEASED ".to_string()
         } else {
             " OC BRIDGE ".to_string()
         };
@@ -108,24 +108,39 @@ impl StatusWidget<'_> {
             (SYMBOL_DISCONNECTED, COLOR_STOPPED, "stopped")
         };
 
-        let bridge_text = if !self.state.daemon_running {
-            "stopped"
-        } else if self.state.bridge_paused {
-            "paused"
-        } else {
-            "running"
-        };
+        let (session_label, session_text) =
+            if self.state.controller_transport_config == ControllerTransport::Serial {
+                let text = if !self.state.daemon_running {
+                    "stopped"
+                } else if self.state.bridge_paused {
+                    "released"
+                } else {
+                    match self.state.controller_state {
+                        ControllerTransportState::Serial { .. } => "attached",
+                        ControllerTransportState::Waiting => "waiting",
+                        _ => "running",
+                    }
+                };
+                ("Serial: ", text)
+            } else {
+                let text = if !self.state.daemon_running {
+                    "stopped"
+                } else {
+                    "running"
+                };
+                ("Bridge: ", text)
+            };
 
-        let ctrl_text = match self.state.controller_transport_config {
+        let controller_text = match self.state.controller_transport_config {
             ControllerTransport::Serial => "Serial",
             ControllerTransport::Udp => "UDP",
-            ControllerTransport::WebSocket => "WS",
+            ControllerTransport::WebSocket => "WebSocket",
         };
 
         let host_text = match self.state.host_transport_config {
             HostTransport::Udp => "UDP",
-            HostTransport::WebSocket => "WS",
-            HostTransport::Both => "UDP+WS",
+            HostTransport::WebSocket => "WebSocket",
+            HostTransport::Both => "UDP+WebSocket",
         };
 
         let left = Line::from(vec![
@@ -134,10 +149,11 @@ impl StatusWidget<'_> {
             Span::styled(daemon_indicator.0, Style::new().fg(daemon_indicator.1)),
             Span::raw(" "),
             Span::styled(daemon_indicator.2, STYLE_VALUE),
-            Span::styled("  Bridge: ", STYLE_LABEL),
-            Span::styled(bridge_text, STYLE_VALUE),
-            Span::styled("  Ctrl: ", STYLE_LABEL),
-            Span::styled(ctrl_text, STYLE_VALUE),
+            Span::styled("  ", STYLE_LABEL),
+            Span::styled(session_label, STYLE_LABEL),
+            Span::styled(session_text, STYLE_VALUE),
+            Span::styled("  Controller: ", STYLE_LABEL),
+            Span::styled(controller_text, STYLE_VALUE),
             Span::styled("  Host: ", STYLE_LABEL),
             Span::styled(host_text, STYLE_VALUE),
         ]);
@@ -151,10 +167,10 @@ impl StatusWidget<'_> {
         };
 
         let right = Line::from(vec![
-            Span::styled("CTL:", STYLE_LABEL),
+            Span::styled("Control ", STYLE_LABEL),
             Span::styled(format!("{}", self.state.control_port), STYLE_VALUE),
             Span::raw("  "),
-            Span::styled("LOG:", STYLE_LABEL),
+            Span::styled("Logs ", STYLE_LABEL),
             Span::styled(format!("{}", self.state.log_port), STYLE_VALUE),
             Span::raw(" "),
             log_indicator,
@@ -181,7 +197,7 @@ impl StatusWidget<'_> {
             (
                 SYMBOL_STOPPED_SQUARE,
                 COLOR_MUTED,
-                "Serial:paused".to_string(),
+                "Serial:released".to_string(),
             )
         } else {
             match &self.state.controller_state {
@@ -191,9 +207,11 @@ impl StatusWidget<'_> {
                 ControllerTransportState::Udp { port } => {
                     (SYMBOL_CONNECTED, COLOR_RUNNING, format!("UDP:{}", port))
                 }
-                ControllerTransportState::WebSocket { port } => {
-                    (SYMBOL_CONNECTED, COLOR_RUNNING, format!("WS:{}", port))
-                }
+                ControllerTransportState::WebSocket { port } => (
+                    SYMBOL_CONNECTED,
+                    COLOR_RUNNING,
+                    format!("WebSocket:{}", port),
+                ),
                 ControllerTransportState::Waiting => {
                     (SYMBOL_DISCONNECTED, COLOR_MUTED, "Waiting...".to_string())
                 }
@@ -233,9 +251,9 @@ impl StatusWidget<'_> {
         // Transport info based on host state
         let transport_text = match &self.state.host_state {
             HostTransportState::Udp { port } => format!("UDP:{}", port),
-            HostTransportState::WebSocket { port } => format!("WS:{}", port),
+            HostTransportState::WebSocket { port } => format!("WebSocket:{}", port),
             HostTransportState::Both { udp_port, ws_port } => {
-                format!("UDP:{} + WS:{}", udp_port, ws_port)
+                format!("UDP:{} + WebSocket:{}", udp_port, ws_port)
             }
         };
 

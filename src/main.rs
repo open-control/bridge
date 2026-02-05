@@ -79,7 +79,13 @@ fn main() -> Result<()> {
 
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| error::BridgeError::Runtime { source: e })?;
-        return rt.block_on(run_daemon(cli.verbose, cli.port, cli.udp_port));
+        return rt.block_on(run_daemon(
+            cli.verbose,
+            cli.port,
+            cli.udp_port,
+            cli.daemon_control_port,
+            cli.daemon_log_broadcast_port,
+        ));
     }
 
     // Handle headless mode (UDP/WS for dev)
@@ -119,7 +125,13 @@ async fn run_tui() -> Result<()> {
 /// Run the bridge in daemon mode (background, no TUI)
 ///
 /// Uses the per-user config and is intended to be launched by a per-user supervisor (ms-manager).
-async fn run_daemon(verbose: bool, port: Option<String>, udp_port: Option<u16>) -> Result<()> {
+async fn run_daemon(
+    verbose: bool,
+    port: Option<String>,
+    udp_port: Option<u16>,
+    control_port: Option<u16>,
+    log_broadcast_port: Option<u16>,
+) -> Result<()> {
     let mut cfg = config::load();
 
     // Apply CLI overrides (useful for systemd unit files)
@@ -128,6 +140,14 @@ async fn run_daemon(verbose: bool, port: Option<String>, udp_port: Option<u16>) 
     }
     if let Some(udp_port) = udp_port {
         cfg.bridge.host_udp_port = udp_port;
+    }
+
+    if let Some(control_port) = control_port {
+        cfg.bridge.control_port = control_port;
+    }
+
+    if let Some(log_broadcast_port) = log_broadcast_port {
+        cfg.bridge.log_broadcast_port = log_broadcast_port;
     }
 
     // Print startup info
@@ -167,14 +187,65 @@ async fn run_daemon(verbose: bool, port: Option<String>, udp_port: Option<u16>) 
         shutdown_clone.store(true, Ordering::SeqCst);
     });
 
-    // Create log broadcaster for daemon -> TUI (same behavior as Windows service)
+    // Logs:
+    // - UDP broadcast for dev TUI monitoring (localhost)
+    // - rotating file logs for product supervisors (ms-manager)
     let log_tx =
         logging::broadcast::create_log_broadcaster_with_port(cfg.bridge.log_broadcast_port);
+
+    let file_filter = logging::file::FileLogFilter {
+        include_protocol: cfg.logs.file_include_protocol,
+        include_debug: cfg.logs.file_include_debug,
+        include_system: cfg.logs.file_include_system,
+    };
+
+    let file_tx: Option<std::sync::mpsc::SyncSender<logging::LogEntry>> = if !cfg.logs.file_enabled
+    {
+        None
+    } else {
+        match crate::config::config_dir() {
+            Ok(d) => {
+                let path = d.join("bridge.log");
+                match logging::file::spawn_file_logger(logging::file::FileLoggerConfig {
+                    path,
+                    max_bytes: cfg.logs.file_max_bytes,
+                    max_files: cfg.logs.file_max_files,
+                    flush_interval: std::time::Duration::from_millis(cfg.logs.file_flush_ms),
+                    channel_capacity: 1024,
+                }) {
+                    Ok(tx) => Some(tx),
+                    Err(e) => {
+                        let _ = log_tx.send(logging::LogEntry::system(format!(
+                            "File logging disabled: {}",
+                            e
+                        )));
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = log_tx.send(logging::LogEntry::system(format!(
+                    "File logging disabled: {}",
+                    e
+                )));
+                None
+            }
+        }
+    };
+
     let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel(constants::CHANNEL_CAPACITY);
 
     let log_tx_clone = log_tx.clone();
     tokio::spawn(async move {
+        let mut file_tx = file_tx;
         while let Some(entry) = tokio_rx.recv().await {
+            if let Some(ref tx) = file_tx {
+                if file_filter.should_write(&entry) && tx.try_send(entry.clone()).is_err() {
+                    // If the logger thread died, stop attempting.
+                    file_tx = None;
+                }
+            }
+
             let _ = log_tx_clone.send(entry);
         }
     });
@@ -214,6 +285,9 @@ async fn run_headless(
         controller_udp_port: ctrl_port,
         host_transport: HostTransport::Udp,
         host_udp_port,
+        // Headless mode is a dev tool; disable the control plane to avoid port collisions
+        // with a running daemon.
+        control_port: 0,
         ..BridgeConfig::default()
     };
 

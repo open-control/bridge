@@ -28,5 +28,17 @@ log_broadcast_port = 9999
 max_entries = 200
 export_max = 2000
 
+# Persistent file logs (rotating).
+# Written to the per-user config directory as bridge.log (plus bridge.log.1..N).
+file_enabled = true
+file_max_bytes = 5000000
+file_max_files = 3
+file_flush_ms = 250
+
+# Protocol logs can be high volume; keep disabled by default.
+file_include_protocol = false
+file_include_debug = true
+file_include_system = true
+
 [ui]
 default_filter = "All"

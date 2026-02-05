@@ -90,7 +90,7 @@ impl LogWidget<'_> {
 
         let line = Line::from(vec![
             Span::styled(" Filter: ", STYLE_LABEL),
-            self.filter_button("1", "Proto", is_protocol),
+            self.filter_button("1", "Protocol", is_protocol),
             Span::raw("  "),
             self.filter_button("2", "Debug", is_debug),
             Span::raw("  "),
@@ -172,15 +172,15 @@ impl LogWidget<'_> {
             .map(|entry| format_log_entry(entry, inner_width))
             .collect();
 
-        // Title with pause hint on the right
+        // Title with freeze/follow hint on the right
         let title_left = " Logs ";
         let title_right = if self.paused {
             Line::from(vec![
-                Span::styled("PAUSED ", Style::new().fg(COLOR_WARNING)),
-                Span::styled("P Resume ", STYLE_MUTED),
+                Span::styled("FROZEN ", Style::new().fg(COLOR_WARNING)),
+                Span::styled("P Follow ", STYLE_MUTED),
             ])
         } else {
-            Line::from(Span::styled("P Pause ", STYLE_DIM))
+            Line::from(Span::styled("P Freeze ", STYLE_DIM))
         };
 
         let block = Block::default()

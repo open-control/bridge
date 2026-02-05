@@ -214,6 +214,35 @@ pub struct LogsConfig {
     pub max_entries: usize,
     /// Maximum log entries when exporting
     pub export_max: usize,
+
+    // =========================================================================
+    // File logging (daemon)
+    // =========================================================================
+    /// Persist logs to a rotating file in the per-user config directory.
+    ///
+    /// This is the recommended log source for product supervisors (e.g. ms-manager)
+    /// because it is multi-client safe and survives process crashes.
+    pub file_enabled: bool,
+
+    /// Rotate when the active log file exceeds this size (bytes).
+    pub file_max_bytes: u64,
+
+    /// Number of rotated files to keep (bridge.log.1..N).
+    pub file_max_files: usize,
+
+    /// Flush interval for file writes (milliseconds).
+    pub file_flush_ms: u64,
+
+    /// Include protocol message logs in the file.
+    ///
+    /// Protocol logs can be high volume; keep disabled by default.
+    pub file_include_protocol: bool,
+
+    /// Include debug logs in the file.
+    pub file_include_debug: bool,
+
+    /// Include system logs in the file.
+    pub file_include_system: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,6 +279,13 @@ impl Default for LogsConfig {
         Self {
             max_entries: 200,
             export_max: 2000,
+            file_enabled: true,
+            file_max_bytes: 5_000_000,
+            file_max_files: 3,
+            file_flush_ms: 250,
+            file_include_protocol: false,
+            file_include_debug: true,
+            file_include_system: true,
         }
     }
 }
@@ -507,6 +543,14 @@ mod tests {
 
         assert_eq!(config.max_entries, 200);
         assert_eq!(config.export_max, 2000);
+
+        assert!(config.file_enabled);
+        assert_eq!(config.file_max_bytes, 5_000_000);
+        assert_eq!(config.file_max_files, 3);
+        assert_eq!(config.file_flush_ms, 250);
+        assert!(!config.file_include_protocol);
+        assert!(config.file_include_debug);
+        assert!(config.file_include_system);
     }
 
     #[test]
@@ -633,6 +677,7 @@ mod tests {
             logs: LogsConfig {
                 max_entries: 500,
                 export_max: 5000,
+                ..LogsConfig::default()
             },
             ui: UiConfig {
                 default_filter: "Protocol".to_string(),

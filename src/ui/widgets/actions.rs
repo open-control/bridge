@@ -3,6 +3,7 @@
 //! Shows available commands based on current state.
 
 use crate::app::AppState;
+use crate::config::ControllerTransport;
 use crate::ui::theme::{STYLE_ACTION, STYLE_DIM, STYLE_KEY};
 use ratatui::{
     buffer::Buffer,
@@ -23,22 +24,24 @@ impl<'a> ActionsWidget<'a> {
 
 impl Widget for ActionsWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let bridge_action = if !self.state.daemon_running {
+        let serial_action = if !self.state.daemon_running
+            || self.state.controller_transport_config != ControllerTransport::Serial
+        {
             ("–", true)
         } else if self.state.bridge_paused {
-            ("Resume", false)
+            ("Attach", false)
         } else {
-            ("Pause", false)
+            ("Release", false)
         };
 
         // Build first line: main commands
         let mut line1_spans = vec![Span::raw("  "), Span::styled("B", STYLE_KEY)];
 
-        if bridge_action.1 {
-            line1_spans.push(Span::styled(" Bridge:–  ", STYLE_DIM));
+        if serial_action.1 {
+            line1_spans.push(Span::styled(" Serial:–  ", STYLE_DIM));
         } else {
             line1_spans.push(Span::styled(
-                format!(" Bridge:{}  ", bridge_action.0),
+                format!(" Serial:{}  ", serial_action.0),
                 STYLE_ACTION,
             ));
         }
@@ -55,13 +58,17 @@ impl Widget for ActionsWidget<'_> {
         ]);
 
         // Pause state
-        let pause_label = if self.state.paused { "Resume" } else { "Pause" };
+        let logs_label = if self.state.paused {
+            "Follow"
+        } else {
+            "Freeze"
+        };
 
         // Build second line: utilities
         let line2_spans = vec![
             Span::raw("  "),
             Span::styled("P", STYLE_KEY),
-            Span::styled(format!(" {} ", pause_label), STYLE_ACTION),
+            Span::styled(format!(" Logs:{} ", logs_label), STYLE_ACTION),
             Span::styled("C", STYLE_KEY),
             Span::styled(" Copy ", STYLE_ACTION),
             Span::styled("X", STYLE_KEY),

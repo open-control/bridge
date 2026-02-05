@@ -162,6 +162,11 @@ impl App {
             return;
         }
 
+        if self.config.bridge.controller_transport != ControllerTransport::Serial {
+            self.set_status("Serial control is only available in Serial controller mode");
+            return;
+        }
+
         let port = self.config.bridge.control_port;
         let cmd = if self.bridge_paused {
             "resume"
@@ -173,13 +178,13 @@ impl App {
                 self.bridge_paused = resp.paused;
                 self.serial_open = resp.serial_open;
                 self.set_status(if resp.paused {
-                    "Serial paused"
+                    "Serial released"
                 } else {
-                    "Serial resumed"
+                    "Serial attached"
                 });
             }
             Err(e) => {
-                self.set_status(format!("Bridge control failed: {}", e));
+                self.set_status(format!("Serial control failed: {}", e));
             }
         }
     }

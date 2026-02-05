@@ -7,6 +7,7 @@
 
 pub mod broadcast;
 pub mod entry;
+pub mod file;
 pub mod filter;
 pub mod receiver;
 pub mod store;

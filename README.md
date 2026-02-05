@@ -37,40 +37,46 @@ Prebuilt binaries available in [Releases](https://github.com/open-control/bridge
 ### Run
 
 ```bash
-# Launch TUI (auto-detects Teensy)
+# Run the daemon (single instance, per-user config)
+oc-bridge --daemon
+
+# Launch the TUI client (monitors a running daemon)
 oc-bridge
 
-# Headless mode
-oc-bridge --headless
+# Headless dev mode (no TUI)
+oc-bridge --headless --controller websocket
 
-# Specify port manually
-oc-bridge --port COM3 --udp-port 9000
+# Override serial + host UDP ports
+oc-bridge --daemon --port COM3 --udp-port 9000
 ```
 
 ### TUI Controls
 
 | Key | Action |
 |-----|--------|
-| `S` | Start/Stop bridge |
-| `1` `2` `3` | Filter: Proto / Debug / All |
-| `P` | Pause log |
-| `C` | Copy log to clipboard |
-| `O` | Export log to file |
-| `F` | Edit config |
-| `Q` | Quit |
+| `B` | Serial: Release / Attach (pause/resume) |
+| `1` `2` `3` | Filter: Protocol / Debug / All |
+| `P` | Logs: Freeze / Follow (UI only) |
+| `C` | Copy filtered logs |
+| `X` | Cut (copy + clear) |
+| `Backspace` | Clear logs |
+| `E` | Export filtered logs |
+| `F` | Open config |
+| `Q` / `Esc` | Quit |
 
-### Windows Service
+Debug filter shortcuts (only when Filter = Debug):
 
-```bash
-# Install (runs at startup, no window)
-oc-bridge    # then press 'I' in TUI
+- `D`: show DEBUG
+- `W`: show WARN
+- `R`: show ERROR
+- `A`: show all levels
 
-# Or from command line (requires elevation)
-oc-bridge --install-service
-oc-bridge --uninstall-service
-```
+### Autostart (End-User)
 
-### Local Control (Pause/Resume)
+For end-user releases, `oc-bridge` is intended to be started and supervised by `ms-manager`
+(tray/background). `oc-bridge` does not install OS services.
+
+### Local Control (Pause/Resume/Status)
 
 To allow firmware flashing without stopping the whole bridge process, `oc-bridge` exposes a
 minimal local control plane.
@@ -82,11 +88,20 @@ minimal local control plane.
 # Query status
 oc-bridge ctl status
 
+# Connectivity check
+oc-bridge ctl ping
+
+# Daemon info (pid/version/config/ports)
+oc-bridge ctl info
+
 # Temporarily release the serial port
 oc-bridge ctl pause
 
 # Resume normal operation
 oc-bridge ctl resume
+
+# Ask the daemon to exit
+oc-bridge ctl shutdown
 
 # Override port
 oc-bridge ctl --control-port 7999 status
@@ -94,20 +109,44 @@ oc-bridge ctl --control-port 7999 status
 
 ## Configuration
 
-Config file: `config.toml` (next to executable)
+Config file: per-user `config.toml` in the platform config directory:
+
+- Windows: `%APPDATA%\OpenControl\oc-bridge\config.toml`
+- macOS: `~/Library/Application Support/OpenControl/oc-bridge/config.toml`
+- Linux: `$XDG_CONFIG_HOME/opencontrol/oc-bridge/config.toml` (or `~/.config/opencontrol/oc-bridge/config.toml`)
 
 ```toml
 [bridge]
-serial_port = ""        # Empty = auto-detect Teensy
-udp_port = 9000
+controller_transport = "serial"
+serial_port = ""        # Empty = auto-detect via device_preset
+device_preset = "teensy"
+
+host_transport = "udp"
+host_udp_port = 9000
+
+log_broadcast_port = 9999
+
+# Local control plane (127.0.0.1)
+control_port = 7999
 
 [logs]
 max_entries = 200
 export_max = 2000
 
+# Persistent file logs (rotating)
+file_enabled = true
+file_max_bytes = 5000000
+file_max_files = 3
+file_flush_ms = 250
+file_include_protocol = false
+file_include_debug = true
+file_include_system = true
+
 [ui]
-default_filter = "All"  # "Proto", "Debug", or "All"
+default_filter = "All"  # "Protocol", "Debug", or "All"
 ```
+
+When enabled, file logs are written as `bridge.log` (plus `bridge.log.1..N`) next to `config.toml`.
 
 ## Build from Source
 

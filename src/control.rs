@@ -53,6 +53,7 @@ pub struct ControlInfo {
     pub host_udp_port: u16,
     pub log_broadcast_port: u16,
     pub control_port: u16,
+    pub serial_supported: bool,
 }
 
 impl ControlState {
@@ -186,26 +187,38 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
 
     match cmd.as_str() {
         "pause" => {
-            state.set_desired(SerialRunState::Paused);
+            if !state.info.serial_supported {
+                ok = false;
+                message = Some("pause not supported (controller transport is not Serial)".into());
+            } else {
+                state.set_desired(SerialRunState::Paused);
 
-            let deadline = Instant::now() + PAUSE_ACK_TIMEOUT;
-            let mut open_rx = state.serial_open_rx.clone();
-            while *open_rx.borrow() {
-                let now = Instant::now();
-                if now >= deadline {
-                    ok = false;
-                    message = Some("timeout waiting for serial to close".to_string());
-                    break;
-                }
-                let remaining = deadline - now;
-                match tokio::time::timeout(remaining, open_rx.changed()).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(_)) => break,
-                    Err(_) => {}
+                let deadline = Instant::now() + PAUSE_ACK_TIMEOUT;
+                let mut open_rx = state.serial_open_rx.clone();
+                while *open_rx.borrow() {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        ok = false;
+                        message = Some("timeout waiting for serial to close".to_string());
+                        break;
+                    }
+                    let remaining = deadline - now;
+                    match tokio::time::timeout(remaining, open_rx.changed()).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => break,
+                        Err(_) => {}
+                    }
                 }
             }
         }
-        "resume" => state.set_desired(SerialRunState::Running),
+        "resume" => {
+            if !state.info.serial_supported {
+                ok = false;
+                message = Some("resume not supported (controller transport is not Serial)".into());
+            } else {
+                state.set_desired(SerialRunState::Running)
+            }
+        }
         "status" | "ping" | "info" => {}
         "shutdown" => state.request_shutdown(),
         other => {

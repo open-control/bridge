@@ -49,6 +49,18 @@ pub struct Cli {
     #[arg(long)]
     pub daemon: bool,
 
+    /// Override the control plane bind port in daemon mode
+    ///
+    /// This does not modify the config file; it only affects this process.
+    #[arg(long, value_name = "PORT", requires = "daemon")]
+    pub daemon_control_port: Option<u16>,
+
+    /// Override the log broadcast port in daemon mode
+    ///
+    /// This does not modify the config file; it only affects this process.
+    #[arg(long, value_name = "PORT", requires = "daemon")]
+    pub daemon_log_broadcast_port: Option<u16>,
+
     /// Controller transport type (requires --headless)
     ///
     /// - websocket (or ws): Listen on WebSocket port for browser/WASM apps

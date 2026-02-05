@@ -10,7 +10,11 @@ impl App {
     /// Toggle pause state
     pub fn toggle_pause(&mut self) {
         let paused = self.logs.toggle_pause();
-        self.set_status(if paused { "Paused" } else { "Resumed" });
+        self.set_status(if paused {
+            "Logs frozen"
+        } else {
+            "Logs following"
+        });
     }
 
     /// Copy filtered logs to clipboard
