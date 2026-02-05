@@ -18,6 +18,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
+pub const CONTROL_SCHEMA: u32 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SerialRunState {
     Running,
@@ -34,6 +36,8 @@ impl SerialRunState {
 pub struct ControlState {
     desired_tx: watch::Sender<SerialRunState>,
     serial_open_rx: watch::Receiver<bool>,
+    shutdown: Arc<AtomicBool>,
+    info: ControlInfo,
 }
 
 pub struct ControlRuntime {
@@ -41,14 +45,26 @@ pub struct ControlRuntime {
     pub serial_open_tx: watch::Sender<bool>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ControlInfo {
+    pub pid: u32,
+    pub version: String,
+    pub config_path: String,
+    pub host_udp_port: u16,
+    pub log_broadcast_port: u16,
+    pub control_port: u16,
+}
+
 impl ControlState {
-    pub fn new() -> (Self, ControlRuntime) {
+    pub fn new(shutdown: Arc<AtomicBool>, info: ControlInfo) -> (Self, ControlRuntime) {
         let (desired_tx, desired_rx) = watch::channel(SerialRunState::Running);
         let (serial_open_tx, serial_open_rx) = watch::channel(false);
         (
             Self {
                 desired_tx,
                 serial_open_rx,
+                shutdown,
+                info,
             },
             ControlRuntime {
                 desired_rx,
@@ -68,27 +84,58 @@ impl ControlState {
     pub fn serial_open(&self) -> bool {
         *self.serial_open_rx.borrow()
     }
+
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    pub fn info(&self) -> &ControlInfo {
+        &self.info
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Request {
+    #[serde(default)]
+    schema: Option<u32>,
     cmd: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
+    #[serde(default)]
+    pub schema: Option<u32>,
     pub ok: bool,
     pub paused: bool,
     pub serial_open: bool,
     pub message: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_udp_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_broadcast_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_port: Option<u16>,
 }
 
-pub async fn run_server(port: u16, state: ControlState, shutdown: Arc<AtomicBool>) -> Result<()> {
+pub async fn bind_listener(port: u16) -> Result<TcpListener> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let listener = TcpListener::bind(addr)
+    TcpListener::bind(addr)
         .await
-        .map_err(|e| BridgeError::ControlBind { port, source: e })?;
+        .map_err(|e| BridgeError::ControlBind { port, source: e })
+}
 
+pub async fn run_server_with_listener(
+    listener: TcpListener,
+    state: ControlState,
+    shutdown: Arc<AtomicBool>,
+) -> Result<()> {
     while !shutdown.load(Ordering::Relaxed) {
         let accept =
             tokio::time::timeout(std::time::Duration::from_millis(250), listener.accept()).await;
@@ -159,7 +206,8 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
             }
         }
         "resume" => state.set_desired(SerialRunState::Running),
-        "status" => {}
+        "status" | "ping" | "info" => {}
+        "shutdown" => state.request_shutdown(),
         other => {
             ok = false;
             message = Some(format!("unknown cmd: {other}"));
@@ -169,12 +217,29 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
     let paused = state.desired().is_paused();
     let serial_open = state.serial_open();
 
-    let resp = Response {
+    let mut resp = Response {
+        schema: Some(CONTROL_SCHEMA),
         ok,
         paused,
         serial_open,
         message,
+        pid: None,
+        version: None,
+        config_path: None,
+        host_udp_port: None,
+        log_broadcast_port: None,
+        control_port: None,
     };
+
+    if cmd == "status" || cmd == "info" {
+        let info = state.info();
+        resp.pid = Some(info.pid);
+        resp.version = Some(info.version.clone());
+        resp.config_path = Some(info.config_path.clone());
+        resp.host_udp_port = Some(info.host_udp_port);
+        resp.log_broadcast_port = Some(info.log_broadcast_port);
+        resp.control_port = Some(info.control_port);
+    }
     let out = serde_json::to_vec(&resp).map_err(|e| BridgeError::ControlProtocol {
         message: e.to_string(),
     })?;
@@ -201,6 +266,7 @@ pub fn send_command_blocking(
         .map_err(|e| BridgeError::ControlConnect { port, source: e })?;
 
     let req = serde_json::to_string(&Request {
+        schema: Some(CONTROL_SCHEMA),
         cmd: cmd.to_string(),
     })
     .map_err(|e| BridgeError::ControlProtocol {

@@ -15,22 +15,8 @@ impl App {
                 self.quit();
                 true
             }
-            AppCommand::ToggleLocalBridge => {
-                self.toggle_local_bridge();
-                false
-            }
-            AppCommand::ToggleService => {
-                self.toggle_service();
-                false
-            }
-            AppCommand::InstallService => {
-                self.install_service();
-                false
-            }
-            AppCommand::UninstallService => {
-                if self.service_status.is_installed() {
-                    self.uninstall_service();
-                }
+            AppCommand::ToggleBridgePause => {
+                self.toggle_bridge_pause();
                 false
             }
             AppCommand::ScrollUp => {
@@ -100,10 +86,6 @@ impl App {
             }
             AppCommand::OpenConfig => {
                 self.open_config();
-                false
-            }
-            AppCommand::OpenModeSettings => {
-                self.open_mode_settings();
                 false
             }
             AppCommand::None => false,

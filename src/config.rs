@@ -1,7 +1,12 @@
 //! Configuration management
 //!
-//! Config file is stored next to the executable as `config.toml`
-//! Device presets are stored in `config/devices/*.toml`
+//! Config file is stored in a per-user config directory as `config.toml`.
+//! Device presets are stored alongside it in `devices/*.toml`.
+//!
+//! Rationale:
+//! - keeps config stable across app upgrades (binary path changes)
+//! - avoids collisions between multiple installs
+//! - matches standard platform conventions
 
 use crate::constants::{
     DEFAULT_CONTROLLER_UDP_PORT, DEFAULT_CONTROLLER_WEBSOCKET_PORT, DEFAULT_CONTROL_PORT,
@@ -12,6 +17,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use tracing::warn;
+
+const DEFAULT_CONFIG_TOML: &str = include_str!("../config/default.toml");
+const DEFAULT_DEVICE_TEENSY_TOML: &str = include_str!("../config/devices/teensy.toml");
 
 // =============================================================================
 // Device Configuration
@@ -157,9 +165,9 @@ pub struct BridgeConfig {
     /// Only used when controller_transport = Serial
     pub serial_port: String,
 
-    /// Device preset name (filename without .toml in config/devices/)
+    /// Device preset name (filename without .toml in devices/)
     /// Used for auto-detection when serial_port is empty.
-    /// Example: "teensy" loads config/devices/teensy.toml
+    /// Example: "teensy" loads devices/teensy.toml
     pub device_preset: Option<String>,
 
     /// UDP port for controller (desktop app simulation)
@@ -221,7 +229,7 @@ impl Default for BridgeConfig {
             // Controller side
             controller_transport: ControllerTransport::Serial,
             serial_port: String::new(),
-            device_preset: None,
+            device_preset: Some("teensy".to_string()),
             controller_udp_port: DEFAULT_CONTROLLER_UDP_PORT,
             controller_websocket_port: DEFAULT_CONTROLLER_WEBSOCKET_PORT,
             // Host side
@@ -254,13 +262,63 @@ impl Default for UiConfig {
     }
 }
 
-/// Get the project root directory
-///
-/// Searches in order:
-/// 1. Next to executable (production deployment)
-/// 2. Up from target/release or target/debug (dev builds)
-fn find_project_root() -> Result<PathBuf> {
-    let exe = std::env::current_exe().map_err(|e| BridgeError::ConfigRead {
+pub fn config_dir() -> Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("APPDATA").ok_or_else(|| BridgeError::ConfigValidation {
+            field: "APPDATA",
+            reason: "environment variable not set".into(),
+        })?;
+        Ok(PathBuf::from(base).join("OpenControl").join("oc-bridge"))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME").ok_or_else(|| BridgeError::ConfigValidation {
+            field: "HOME",
+            reason: "environment variable not set".into(),
+        })?;
+        Ok(PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("OpenControl")
+            .join("oc-bridge"))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(v) = std::env::var_os("XDG_CONFIG_HOME") {
+            Ok(PathBuf::from(v).join("opencontrol").join("oc-bridge"))
+        } else {
+            let home = std::env::var_os("HOME").ok_or_else(|| BridgeError::ConfigValidation {
+                field: "HOME",
+                reason: "environment variable not set".into(),
+            })?;
+            Ok(PathBuf::from(home)
+                .join(".config")
+                .join("opencontrol")
+                .join("oc-bridge"))
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        Err(BridgeError::PlatformNotSupported {
+            feature: "config_dir",
+        })
+    }
+}
+
+pub fn config_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("config.toml"))
+}
+
+pub fn devices_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join("devices"))
+}
+
+fn legacy_root_next_to_exe() -> Result<PathBuf> {
+    let exe = std::env::current_exe().map_err(|e| BridgeError::Io {
         path: PathBuf::from("executable"),
         source: e,
     })?;
@@ -268,74 +326,66 @@ fn find_project_root() -> Result<PathBuf> {
         field: "exe_path",
         reason: "no parent directory".into(),
     })?;
+    Ok(exe_dir.to_path_buf())
+}
 
-    // Check if config exists next to executable (production)
-    if exe_dir.join("config.toml").exists() || exe_dir.join("config").exists() {
-        return Ok(exe_dir.to_path_buf());
-    }
+fn ensure_user_config_scaffold() -> Result<PathBuf> {
+    let root = config_dir()?;
+    std::fs::create_dir_all(&root).map_err(|e| BridgeError::Io {
+        path: root.clone(),
+        source: e,
+    })?;
 
-    // Check if we're in target/release or target/debug (dev)
-    // exe_dir = .../bridge/target/release, we want .../bridge
-    if let Some(target_dir) = exe_dir.parent() {
-        if target_dir
-            .file_name()
-            .map(|n| n == "target")
-            .unwrap_or(false)
-        {
-            if let Some(project_root) = target_dir.parent() {
-                if project_root.join("config").exists() {
-                    return Ok(project_root.to_path_buf());
+    let cfg_path = root.join("config.toml");
+    let devices = root.join("devices");
+    let teensy = devices.join("teensy.toml");
+
+    // One-shot migration from legacy layout (next to exe).
+    if !cfg_path.exists() {
+        if let Ok(legacy_root) = legacy_root_next_to_exe() {
+            let legacy_cfg = legacy_root.join("config.toml");
+            if legacy_cfg.exists() {
+                let _ = std::fs::copy(&legacy_cfg, &cfg_path);
+            } else {
+                let legacy_default = legacy_root.join("config").join("default.toml");
+                if legacy_default.exists() {
+                    let _ = std::fs::copy(&legacy_default, &cfg_path);
                 }
             }
         }
     }
 
-    // Fallback to exe_dir
-    Ok(exe_dir.to_path_buf())
-}
-
-/// Get the config file path
-///
-/// Looks for config.toml, falls back to config/default.toml
-pub fn config_path() -> Result<PathBuf> {
-    let root = find_project_root()?;
-
-    // First try config.toml (user config)
-    let user_config = root.join("config.toml");
-    if user_config.exists() {
-        return Ok(user_config);
+    if !cfg_path.exists() {
+        std::fs::write(&cfg_path, DEFAULT_CONFIG_TOML).map_err(|e| BridgeError::Io {
+            path: cfg_path.clone(),
+            source: e,
+        })?;
     }
 
-    // Fall back to config/default.toml
-    let default_config = root.join("config").join("default.toml");
-    if default_config.exists() {
-        return Ok(default_config);
+    std::fs::create_dir_all(&devices).map_err(|e| BridgeError::Io {
+        path: devices.clone(),
+        source: e,
+    })?;
+
+    if !teensy.exists() {
+        if let Ok(legacy_root) = legacy_root_next_to_exe() {
+            let legacy_teensy = legacy_root
+                .join("config")
+                .join("devices")
+                .join("teensy.toml");
+            if legacy_teensy.exists() {
+                let _ = std::fs::copy(&legacy_teensy, &teensy);
+                return Ok(root);
+            }
+        }
+
+        std::fs::write(&teensy, DEFAULT_DEVICE_TEENSY_TOML).map_err(|e| BridgeError::Io {
+            path: teensy.clone(),
+            source: e,
+        })?;
     }
 
-    // Return user config path (will be created if saving)
-    Ok(user_config)
-}
-
-/// Get the devices directory path (config/devices/)
-pub fn devices_dir() -> Result<PathBuf> {
-    let root = find_project_root()?;
-    Ok(root.join("config").join("devices"))
-}
-
-/// List available device presets (filenames without .toml extension)
-pub fn list_device_presets() -> Vec<String> {
-    let dir = match devices_dir() {
-        Ok(d) => d,
-        Err(_) => return vec![],
-    };
-
-    fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map(|x| x == "toml").unwrap_or(false))
-        .filter_map(|e| e.path().file_stem()?.to_str().map(String::from))
-        .collect()
+    Ok(root)
 }
 
 /// Load a device preset by name
@@ -343,7 +393,7 @@ pub fn load_device_preset(name: &str) -> Result<DeviceConfig> {
     let dir = devices_dir()?;
     let path = dir.join(format!("{}.toml", name));
 
-    let content = fs::read_to_string(&path).map_err(|e| BridgeError::ConfigRead {
+    let content = fs::read_to_string(&path).map_err(|e| BridgeError::Io {
         path: path.clone(),
         source: e,
     })?;
@@ -359,6 +409,13 @@ pub fn load_device_preset(name: &str) -> Result<DeviceConfig> {
 
 /// Load config from file, or create default if not exists
 pub fn load() -> Config {
+    // Ensure a usable per-user config scaffold exists (idempotent).
+    // If this fails, we fall back to in-memory defaults.
+    if let Err(e) = ensure_user_config_scaffold() {
+        warn!("Failed to create user config scaffold: {}", e);
+        return Config::default();
+    }
+
     let path = match config_path() {
         Ok(p) => p,
         Err(e) => {
@@ -367,14 +424,7 @@ pub fn load() -> Config {
         }
     };
 
-    if !path.exists() {
-        // Create default config file
-        let config = Config::default();
-        if let Err(e) = save(&config) {
-            warn!("Failed to create default config: {}", e);
-        }
-        return config;
-    }
+    debug_assert!(path.exists(), "config scaffold should create config.toml");
 
     match fs::read_to_string(&path) {
         Ok(content) => match toml::from_str(&content) {
@@ -391,25 +441,10 @@ pub fn load() -> Config {
     }
 }
 
-/// Save config to file
-pub fn save(config: &Config) -> Result<()> {
-    let path = config_path()?;
-    // Config is always serializable (all fields are serde-compatible)
-    let content = toml::to_string_pretty(config).expect("Config serialization failed");
-    fs::write(&path, content).map_err(|e| BridgeError::ConfigRead { path, source: e })?;
-    Ok(())
-}
-
 /// Open config file in default editor
 pub fn open_in_editor() -> Result<()> {
-    let path = config_path()?;
-
-    // Create default config if not exists
-    if !path.exists() {
-        save(&Config::default())?;
-    }
-
-    crate::platform::open_file(&path)
+    let root = ensure_user_config_scaffold()?;
+    crate::platform::open_file(&root.join("config.toml"))
 }
 
 /// Detect serial port from config (explicit port or auto-detection via device preset)
@@ -450,7 +485,7 @@ mod tests {
         // Controller side
         assert_eq!(config.controller_transport, ControllerTransport::Serial);
         assert_eq!(config.serial_port, "");
-        assert_eq!(config.device_preset, None);
+        assert_eq!(config.device_preset, Some("teensy".to_string()));
         assert_eq!(config.controller_udp_port, DEFAULT_CONTROLLER_UDP_PORT);
         assert_eq!(
             config.controller_websocket_port,

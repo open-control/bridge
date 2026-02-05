@@ -48,13 +48,27 @@ pub(super) async fn run(
                     desired_rx,
                     serial_open_tx,
                 },
-            ) = ControlState::new();
+            ) = ControlState::new(
+                shutdown.clone(),
+                crate::control::ControlInfo {
+                    pid: std::process::id(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    config_path: crate::config::config_path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "".to_string()),
+                    host_udp_port: config.host_udp_port,
+                    log_broadcast_port: config.log_broadcast_port,
+                    control_port: config.control_port,
+                },
+            );
             let control_port = config.control_port;
+            let listener = crate::control::bind_listener(control_port).await?;
             let shutdown_ctrl = shutdown.clone();
             let log_tx_ctrl = log_tx.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    crate::control::run_server(control_port, control_state, shutdown_ctrl).await
+                    crate::control::run_server_with_listener(listener, control_state, shutdown_ctrl)
+                        .await
                 {
                     logging::try_log(
                         &log_tx_ctrl,
@@ -64,15 +78,8 @@ pub(super) async fn run(
                 }
             });
 
-            run_with_serial_controller(
-                config,
-                shutdown,
-                stats,
-                log_tx,
-                desired_rx,
-                serial_open_tx,
-            )
-            .await
+            run_with_serial_controller(config, shutdown, stats, log_tx, desired_rx, serial_open_tx)
+                .await
         }
         ControllerTransport::Udp => run_with_udp_controller(config, shutdown, stats, log_tx).await,
         ControllerTransport::WebSocket => {

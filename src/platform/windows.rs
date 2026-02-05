@@ -6,18 +6,19 @@
 //! - Timer resolution (1ms for USB polling)
 //! - Thread priority (highest for serial reader)
 //! - Serial port low-latency configuration
-//! - UAC elevation
-
-use crate::error::{BridgeError, Result};
+//!
+//! Note: oc-bridge background mode is user-scoped; we avoid UAC flows.
 
 use windows::Win32::Devices::Communication::{
     PurgeComm, SetCommTimeouts, SetupComm, COMMTIMEOUTS, PURGE_COMM_FLAGS,
 };
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Media::timeBeginPeriod;
+use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
 use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
 };
+use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
 
 // =============================================================================
 // Performance: Timer resolution
@@ -77,94 +78,32 @@ pub fn configure_serial_low_latency(port: &serialport::COMPort) {
     }
 }
 
-// =============================================================================
-// Elevation: UAC
-// =============================================================================
-
-/// Run a specific action with elevated privileges (UAC prompt)
+/// Hide the current console window (best-effort)
 ///
-/// The elevated process runs independently and the caller continues.
-/// This is the original working implementation from elevation.rs.
-pub fn run_elevated_action(action: &str) -> Result<()> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use std::ptr;
-
-    #[link(name = "shell32")]
-    extern "system" {
-        fn ShellExecuteW(
-            hwnd: *mut std::ffi::c_void,
-            lpOperation: *const u16,
-            lpFile: *const u16,
-            lpParameters: *const u16,
-            lpDirectory: *const u16,
-            nShowCmd: i32,
-        ) -> isize;
-    }
-
-    fn to_wide(s: &str) -> Vec<u16> {
-        OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
-
-    let exe = std::env::current_exe().map_err(|e| BridgeError::ServiceCommand { source: e })?;
-    let exe_wide = to_wide(&exe.to_string_lossy());
-    let verb = to_wide("runas");
-    let args_wide = to_wide(action);
-
-    const SW_HIDE: i32 = 0;
-
-    let result = unsafe {
-        ShellExecuteW(
-            ptr::null_mut(),
-            verb.as_ptr(),
-            exe_wide.as_ptr(),
-            args_wide.as_ptr(),
-            ptr::null(),
-            SW_HIDE,
-        )
-    };
-
-    if result > 32 {
-        Ok(())
-    } else {
-        Err(BridgeError::ServicePermission {
-            action: "run elevated action",
-        })
+/// Used by `--daemon` to avoid flashing a terminal window when launched on login.
+pub fn hide_console_window() {
+    unsafe {
+        let hwnd = GetConsoleWindow();
+        if !hwnd.0.is_null() {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
     }
 }
 
-// =============================================================================
-// Elevation: Check
-// =============================================================================
-
-/// Check if current process has elevated (admin) privileges
-pub fn is_elevated() -> bool {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::Security::{
-        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
-    };
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
+/// Hide the console window only if this process appears to own it.
+///
+/// This avoids hiding the user's terminal when `oc-bridge --daemon` is run
+/// interactively, while still allowing supervisor-launched daemons to run without
+/// an intrusive terminal window.
+pub fn hide_console_window_if_solo() {
     unsafe {
-        let mut token = HANDLE::default();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
-            return false;
+        // We only need to know whether more than one process is attached to the
+        // current console. A 2-element buffer is enough: if there are more, the
+        // API returns the required count (>2).
+        let mut pids = [0u32; 2];
+        let count = GetConsoleProcessList(&mut pids);
+        if count <= 1 {
+            hide_console_window();
         }
-
-        let mut elevation = TOKEN_ELEVATION::default();
-        let mut size = 0u32;
-        let result = GetTokenInformation(
-            token,
-            TokenElevation,
-            Some(&mut elevation as *mut _ as *mut _),
-            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-            &mut size,
-        );
-
-        let _ = CloseHandle(token);
-        result.is_ok() && elevation.TokenIsElevated != 0
     }
 }

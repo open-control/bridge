@@ -20,7 +20,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io;
-use widgets::{actions::ActionsWidget, log::LogWidget, mode::ModePopup, status::StatusWidget};
+use widgets::{actions::ActionsWidget, log::LogWidget, status::StatusWidget};
 
 /// Map io::Error to BridgeError::Runtime
 fn map_io_err(e: io::Error) -> BridgeError {
@@ -116,9 +116,5 @@ fn draw(frame: &mut Frame, app: &App) {
     let actions = ActionsWidget::new(&state);
     frame.render_widget(actions, chunks[2]);
 
-    // Mode settings popup (rendered on top)
-    if let Some(settings) = app.mode_settings() {
-        let popup = ModePopup::new(settings);
-        frame.render_widget(popup, frame.area());
-    }
+    // No popups.
 }

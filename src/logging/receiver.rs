@@ -1,7 +1,6 @@
-//! Log receiver for TUI ← service communication
+//! Log receiver for TUI ← daemon communication
 //!
-//! Receives LogEntry messages via UDP from the service.
-//! Used in monitor mode when the TUI is observing a running service.
+//! Receives LogEntry messages via UDP from `oc-bridge --daemon`.
 
 use super::LogEntry;
 use crate::constants::CHANNEL_CAPACITY;
@@ -15,36 +14,24 @@ use tokio::sync::mpsc;
 pub fn spawn_log_receiver_with_port(
     shutdown: Arc<AtomicBool>,
     port: u16,
-) -> mpsc::Receiver<LogEntry> {
+) -> std::io::Result<mpsc::Receiver<LogEntry>> {
     let (tx, rx) = mpsc::channel::<LogEntry>(CHANNEL_CAPACITY);
 
+    // Bind up-front so callers can handle port-in-use cleanly.
+    let socket = UdpSocket::bind(format!("127.0.0.1:{port}"))?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .ok();
+
     std::thread::spawn(move || {
-        run_receiver(tx, shutdown, port);
+        run_receiver(socket, tx, shutdown);
     });
 
-    rx
+    Ok(rx)
 }
 
 /// Run the receiver loop (blocking, runs in thread)
-fn run_receiver(tx: mpsc::Sender<LogEntry>, shutdown: Arc<AtomicBool>, port: u16) {
-    // Bind to the broadcast port
-    let socket = match UdpSocket::bind(format!("127.0.0.1:{}", port)) {
-        Ok(s) => {
-            let _ = tx.try_send(LogEntry::system(format!(
-                "Log receiver listening on UDP:{}",
-                port
-            )));
-            s
-        }
-        Err(e) => {
-            let _ = tx.try_send(LogEntry::system(format!("Log receiver bind failed: {}", e)));
-            return;
-        }
-    };
-
-    // Set read timeout for responsive shutdown
-    let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
-
+fn run_receiver(socket: UdpSocket, tx: mpsc::Sender<LogEntry>, shutdown: Arc<AtomicBool>) {
     let mut buf = [0u8; 65535];
 
     loop {

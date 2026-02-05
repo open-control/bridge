@@ -11,9 +11,6 @@
 //! // Initialize platform-specific performance settings
 //! platform::init_perf();
 //!
-//! // Check elevation
-//! if platform::is_elevated() { ... }
-//!
 //! // Terminal detection and relaunch
 //! if !platform::is_running_in_terminal() {
 //!     platform::relaunch_in_terminal()?;
@@ -24,7 +21,7 @@
 mod windows;
 
 use crate::error::{BridgeError, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // =============================================================================
 // Platform functions (static dispatch)
@@ -50,22 +47,6 @@ pub fn set_thread_high_priority() {
     windows::set_thread_high_priority();
 }
 
-/// Run an action with elevated privileges (Windows only)
-///
-/// Launches a new process with a UAC prompt (ShellExecuteW runas).
-#[cfg(windows)]
-pub fn run_elevated_action(action: &str) -> Result<()> {
-    windows::run_elevated_action(action)
-}
-
-/// Check if current process is elevated (Windows only)
-///
-/// Checks TOKEN_ELEVATION.
-#[cfg(windows)]
-pub fn is_elevated() -> bool {
-    windows::is_elevated()
-}
-
 // =============================================================================
 // Serial port configuration
 // =============================================================================
@@ -79,6 +60,13 @@ pub fn configure_serial_low_latency(port: &serialport::COMPort) {
     windows::configure_serial_low_latency(port);
 }
 
+/// Hide the current console window only if we appear to own it (Windows only)
+#[inline]
+pub fn hide_console_window_if_solo() {
+    #[cfg(windows)]
+    windows::hide_console_window_if_solo();
+}
+
 // =============================================================================
 // File operations
 // =============================================================================
@@ -89,14 +77,15 @@ pub fn configure_serial_low_latency(port: &serialport::COMPort) {
 /// - Linux: Uses `xdg-open`
 /// - macOS: Uses `open`
 pub fn open_file(path: &Path) -> Result<()> {
-    let map_err = |e| BridgeError::ServiceCommand { source: e };
-
     #[cfg(windows)]
     {
         std::process::Command::new("cmd")
             .args(["/C", "start", "", &path.to_string_lossy()])
             .spawn()
-            .map_err(map_err)?;
+            .map_err(|e| BridgeError::OsCommand {
+                program: "cmd",
+                source: e,
+            })?;
     }
 
     #[cfg(target_os = "linux")]
@@ -104,7 +93,10 @@ pub fn open_file(path: &Path) -> Result<()> {
         std::process::Command::new("xdg-open")
             .arg(path)
             .spawn()
-            .map_err(map_err)?;
+            .map_err(|e| BridgeError::OsCommand {
+                program: "xdg-open",
+                source: e,
+            })?;
     }
 
     #[cfg(target_os = "macos")]
@@ -112,7 +104,10 @@ pub fn open_file(path: &Path) -> Result<()> {
         std::process::Command::new("open")
             .arg(path)
             .spawn()
-            .map_err(map_err)?;
+            .map_err(|e| BridgeError::OsCommand {
+                program: "open",
+                source: e,
+            })?;
     }
 
     Ok(())
@@ -158,7 +153,10 @@ pub fn is_running_in_terminal() -> bool {
 /// - Unix: Tries freedesktop standards (xdg-terminal-exec), then common terminals
 /// - Windows: Uses `cmd /c start` to open new console window
 pub fn relaunch_in_terminal() -> Result<()> {
-    let exe = std::env::current_exe().map_err(|e| BridgeError::ServiceCommand { source: e })?;
+    let exe = std::env::current_exe().map_err(|e| BridgeError::Io {
+        path: PathBuf::from("executable"),
+        source: e,
+    })?;
     let exe_str = exe.to_string_lossy().to_string();
 
     #[cfg(unix)]
@@ -190,7 +188,10 @@ pub fn relaunch_in_terminal() -> Result<()> {
         std::process::Command::new("cmd")
             .args(["/c", "start", "", &exe_str, "--no-relaunch"])
             .spawn()
-            .map_err(|e| BridgeError::ServiceCommand { source: e })?;
+            .map_err(|e| BridgeError::OsCommand {
+                program: "cmd",
+                source: e,
+            })?;
         Ok(())
     }
 }

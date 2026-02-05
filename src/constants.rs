@@ -42,23 +42,13 @@ pub const DEFAULT_HOST_WEBSOCKET_PORT: u16 = 8000;
 // Network - Logs
 // =============================================================================
 
-/// Default UDP port for log broadcasting (service -> TUI)
+/// Default UDP port for log broadcasting (daemon -> TUI)
 pub const DEFAULT_LOG_BROADCAST_PORT: u16 = 9999;
 
 /// Default TCP control port for local IPC (pause/resume/status)
 ///
 /// Convention: 7999 = control plane (local only)
 pub const DEFAULT_CONTROL_PORT: u16 = 7999;
-
-// =============================================================================
-// Timing - Service Operations
-// =============================================================================
-
-/// Delay for Windows SCM operations to settle (milliseconds)
-pub const SERVICE_SCM_SETTLE_DELAY_MS: u64 = 500;
-
-/// Delay for UDP socket release after monitoring shutdown (milliseconds)
-pub const SOCKET_RELEASE_DELAY_MS: u64 = 150;
 
 // =============================================================================
 // Timing - Reconnection
@@ -98,9 +88,6 @@ pub const PAGE_SCROLL_LINES: usize = 10;
 
 /// Auto-scroll threshold (lines from bottom)
 pub const AUTO_SCROLL_THRESHOLD: usize = 5;
-
-/// Service status polling interval (frames, ~2 seconds at 60fps)
-pub const SERVICE_STATUS_POLL_INTERVAL: u32 = 120;
 
 /// Timeout before considering log connection lost (seconds)
 pub const LOG_CONNECTION_TIMEOUT_SECS: u64 = 5;

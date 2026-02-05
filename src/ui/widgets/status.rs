@@ -1,8 +1,8 @@
-//! Status widget - displays bridge status with responsive layout
+//! Status widget - displays daemon/client status with responsive layout
 //!
-//! Shows source (Local/Service), transport config, and connection state.
+//! Shows daemon state, transport config, and connection state.
 
-use crate::app::state::{ControllerTransportState, HostTransportState, ServiceState, Source};
+use crate::app::state::{ControllerTransportState, HostTransportState};
 use crate::app::AppState;
 use crate::config::{ControllerTransport, HostTransport};
 use crate::constants::WIDE_THRESHOLD;
@@ -12,7 +12,7 @@ use crate::ui::theme::{
 };
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
@@ -22,6 +22,7 @@ use ratatui::{
 const SYMBOL_CONNECTED: &str = "●";
 const SYMBOL_DISCONNECTED: &str = "○";
 const SYMBOL_STOPPED_SQUARE: &str = "■";
+const SYMBOL_UNAVAILABLE: &str = "×";
 
 pub struct StatusWidget<'a> {
     state: &'a AppState<'a>,
@@ -44,8 +45,8 @@ impl Widget for StatusWidget<'_> {
         // Title with optional status message
         let title = if let Some(msg) = &self.state.status_message {
             format!(" OC BRIDGE │ {} ", msg)
-        } else if self.state.paused {
-            " OC BRIDGE │ PAUSED ".to_string()
+        } else if self.state.bridge_paused {
+            " OC BRIDGE │ SERIAL PAUSED ".to_string()
         } else {
             " OC BRIDGE ".to_string()
         };
@@ -99,94 +100,72 @@ impl StatusWidget<'_> {
         self.render_host_box(chunks[2], buf);
     }
 
-    /// Render header line: Source | Controller Config | Host Config | Service status
+    /// Render header line
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
-        // Source
-        let source_text = match self.state.source {
-            Source::Local => "Local",
-            Source::Service => "Service",
+        let daemon_indicator = if self.state.daemon_running {
+            (SYMBOL_CONNECTED, COLOR_RUNNING, "running")
+        } else {
+            (SYMBOL_DISCONNECTED, COLOR_STOPPED, "stopped")
         };
 
-        // Controller transport config
+        let bridge_text = if !self.state.daemon_running {
+            "stopped"
+        } else if self.state.bridge_paused {
+            "paused"
+        } else {
+            "running"
+        };
+
         let ctrl_text = match self.state.controller_transport_config {
             ControllerTransport::Serial => "Serial",
             ControllerTransport::Udp => "UDP",
             ControllerTransport::WebSocket => "WS",
         };
 
-        // Host transport config
         let host_text = match self.state.host_transport_config {
             HostTransport::Udp => "UDP",
             HostTransport::WebSocket => "WS",
             HostTransport::Both => "UDP+WS",
         };
 
-        // Build service status section (right side)
-        let service_spans = self.build_service_spans();
-
-        // Calculate spacing for right-alignment
-        let left_content = format!(
-            "  Source: {}  Ctrl: {}  Host: {}",
-            source_text, ctrl_text, host_text
-        );
-        let right_content_len = service_spans.iter().map(|s| s.content.len()).sum::<usize>();
-        let padding = area.width as usize - left_content.len() - right_content_len - 2;
-        let padding_str = " ".repeat(padding.max(1));
-
-        let mut spans = vec![
-            Span::styled("  Source: ", STYLE_LABEL),
-            Span::styled(source_text, STYLE_VALUE),
+        let left = Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Daemon: ", STYLE_LABEL),
+            Span::styled(daemon_indicator.0, Style::new().fg(daemon_indicator.1)),
+            Span::raw(" "),
+            Span::styled(daemon_indicator.2, STYLE_VALUE),
+            Span::styled("  Bridge: ", STYLE_LABEL),
+            Span::styled(bridge_text, STYLE_VALUE),
             Span::styled("  Ctrl: ", STYLE_LABEL),
             Span::styled(ctrl_text, STYLE_VALUE),
             Span::styled("  Host: ", STYLE_LABEL),
             Span::styled(host_text, STYLE_VALUE),
-            Span::raw(padding_str),
-        ];
-        spans.extend(service_spans);
+        ]);
 
-        Paragraph::new(Line::from(spans)).render(area, buf);
-    }
+        let log_indicator = if !self.state.log_available {
+            Span::styled(SYMBOL_UNAVAILABLE, Style::new().fg(COLOR_STOPPED))
+        } else if self.state.log_connected {
+            Span::styled(SYMBOL_CONNECTED, Style::new().fg(COLOR_RUNNING))
+        } else {
+            Span::styled(SYMBOL_DISCONNECTED, Style::new().fg(COLOR_MUTED))
+        };
 
-    /// Build service status spans based on current state
-    fn build_service_spans(&self) -> Vec<Span<'static>> {
-        match self.state.source {
-            Source::Local => {
-                // Show service installation/running state
-                match self.state.service_state {
-                    ServiceState::NotInstalled => vec![
-                        Span::styled("Service: ", STYLE_LABEL),
-                        Span::styled(SYMBOL_DISCONNECTED, Style::new().fg(COLOR_MUTED)),
-                        Span::raw("  "),
-                    ],
-                    ServiceState::Stopped => vec![
-                        Span::styled("Service: ", STYLE_LABEL),
-                        Span::styled(SYMBOL_STOPPED_SQUARE, Style::new().fg(COLOR_STOPPED)),
-                        Span::raw("  "),
-                    ],
-                    ServiceState::Running => vec![
-                        Span::styled("Service: ", STYLE_LABEL),
-                        Span::styled(SYMBOL_CONNECTED, Style::new().fg(COLOR_RUNNING)),
-                        Span::raw("  "),
-                    ],
-                }
-            }
-            Source::Service => {
-                // Show service running + log connection status
-                let log_indicator = if self.state.log_connected {
-                    Span::styled(SYMBOL_CONNECTED, Style::new().fg(COLOR_RUNNING))
-                } else {
-                    Span::styled(SYMBOL_DISCONNECTED, Style::new().fg(COLOR_MUTED))
-                };
+        let right = Line::from(vec![
+            Span::styled("CTL:", STYLE_LABEL),
+            Span::styled(format!("{}", self.state.control_port), STYLE_VALUE),
+            Span::raw("  "),
+            Span::styled("LOG:", STYLE_LABEL),
+            Span::styled(format!("{}", self.state.log_port), STYLE_VALUE),
+            Span::raw(" "),
+            log_indicator,
+            Span::raw("  "),
+        ]);
 
-                vec![
-                    Span::styled("Service: ", STYLE_LABEL),
-                    Span::styled(SYMBOL_CONNECTED, Style::new().fg(COLOR_RUNNING)),
-                    Span::styled(format!(" UDP:{} ", self.state.log_port), STYLE_VALUE),
-                    log_indicator,
-                    Span::raw("  "),
-                ]
-            }
-        }
+        let chunks = Layout::horizontal([Constraint::Min(1), Constraint::Length(26)]).split(area);
+        Paragraph::new(left).render(chunks[0], buf);
+        Paragraph::new(right)
+            .alignment(Alignment::Right)
+            .render(chunks[1], buf);
     }
 
     /// Render Controller (IN) box
@@ -194,24 +173,36 @@ impl StatusWidget<'_> {
         let rx_rate = self.state.rx_rate;
 
         // Transport info with indicator
-        let (indicator, indicator_color, transport_text) = match &self.state.controller_state {
-            ControllerTransportState::Serial { port } => {
-                (SYMBOL_CONNECTED, COLOR_RUNNING, format!("Serial:{}", port))
+        let (indicator, indicator_color, transport_text) = if self.state.bridge_paused
+            && matches!(
+                self.state.controller_transport_config,
+                ControllerTransport::Serial
+            ) {
+            (
+                SYMBOL_STOPPED_SQUARE,
+                COLOR_MUTED,
+                "Serial:paused".to_string(),
+            )
+        } else {
+            match &self.state.controller_state {
+                ControllerTransportState::Serial { port } => {
+                    (SYMBOL_CONNECTED, COLOR_RUNNING, format!("Serial:{}", port))
+                }
+                ControllerTransportState::Udp { port } => {
+                    (SYMBOL_CONNECTED, COLOR_RUNNING, format!("UDP:{}", port))
+                }
+                ControllerTransportState::WebSocket { port } => {
+                    (SYMBOL_CONNECTED, COLOR_RUNNING, format!("WS:{}", port))
+                }
+                ControllerTransportState::Waiting => {
+                    (SYMBOL_DISCONNECTED, COLOR_MUTED, "Waiting...".to_string())
+                }
+                ControllerTransportState::Disconnected => (
+                    SYMBOL_DISCONNECTED,
+                    COLOR_STOPPED,
+                    "Disconnected".to_string(),
+                ),
             }
-            ControllerTransportState::Udp { port } => {
-                (SYMBOL_CONNECTED, COLOR_RUNNING, format!("UDP:{}", port))
-            }
-            ControllerTransportState::WebSocket { port } => {
-                (SYMBOL_CONNECTED, COLOR_RUNNING, format!("WS:{}", port))
-            }
-            ControllerTransportState::Waiting => {
-                (SYMBOL_DISCONNECTED, COLOR_MUTED, "Waiting...".to_string())
-            }
-            ControllerTransportState::Disconnected => (
-                SYMBOL_DISCONNECTED,
-                COLOR_STOPPED,
-                "Disconnected".to_string(),
-            ),
         };
 
         let block = Block::default()
@@ -248,9 +239,11 @@ impl StatusWidget<'_> {
             }
         };
 
-        // Host is always active when bridge is running
-        let indicator = SYMBOL_CONNECTED;
-        let indicator_color = COLOR_RUNNING;
+        let (indicator, indicator_color) = if self.state.daemon_running {
+            (SYMBOL_CONNECTED, COLOR_RUNNING)
+        } else {
+            (SYMBOL_DISCONNECTED, COLOR_STOPPED)
+        };
 
         let block = Block::default()
             .borders(Borders::ALL)

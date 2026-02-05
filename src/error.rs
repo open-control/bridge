@@ -32,21 +32,21 @@ pub enum BridgeError {
     /// Control protocol error
     ControlProtocol { message: String },
 
-    // === Config ===
-    /// Failed to read/write config file
-    ConfigRead {
+    // === IO ===
+    /// File system operation failed
+    Io {
         path: PathBuf,
         source: std::io::Error,
     },
     /// Invalid config value
     ConfigValidation { field: &'static str, reason: String },
 
-    // === Service ===
-    /// Permission denied for service operation
-    #[cfg(any(windows, target_os = "linux"))]
-    ServicePermission { action: &'static str },
-    /// Service command failed
-    ServiceCommand { source: std::io::Error },
+    // === OS Commands ===
+    /// Failed to spawn an OS command
+    OsCommand {
+        program: &'static str,
+        source: std::io::Error,
+    },
 
     // === Detection ===
     /// No device found matching configuration
@@ -56,13 +56,21 @@ pub enum BridgeError {
 
     // === Platform ===
     /// Feature not supported on this platform
-    /// (used in cfg(unix) and cfg(not(windows/linux)) code paths)
-    #[allow(dead_code)]
+    #[cfg(not(windows))]
     PlatformNotSupported { feature: &'static str },
 
     // === Runtime ===
     /// Tokio runtime creation failed
     Runtime { source: std::io::Error },
+
+    // === Instance ===
+    /// Another oc-bridge daemon instance is already running.
+    InstanceAlreadyRunning { lock_path: PathBuf },
+    /// Failed to take or create the instance lock.
+    InstanceLock {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 impl std::error::Error for BridgeError {
@@ -73,9 +81,10 @@ impl std::error::Error for BridgeError {
             | Self::WebSocketBind { source, .. }
             | Self::ControlBind { source, .. }
             | Self::ControlConnect { source, .. }
-            | Self::ConfigRead { source, .. }
-            | Self::ServiceCommand { source }
-            | Self::Runtime { source } => Some(source),
+            | Self::Io { source, .. }
+            | Self::OsCommand { source, .. }
+            | Self::Runtime { source }
+            | Self::InstanceLock { source, .. } => Some(source),
             Self::WebSocketAccept { source } => Some(source.as_ref()),
             _ => None,
         }
@@ -94,23 +103,30 @@ impl fmt::Display for BridgeError {
                 write!(f, "Cannot connect to control port {}", port)
             }
             Self::ControlProtocol { message } => write!(f, "Control protocol error: {}", message),
-            Self::ConfigRead { path, .. } => {
-                write!(f, "Cannot read config: {}", path.display())
-            }
+            Self::Io { path, .. } => write!(f, "IO error: {}", path.display()),
             Self::ConfigValidation { field, reason } => {
                 write!(f, "Invalid {}: {}", field, reason)
             }
-            #[cfg(any(windows, target_os = "linux"))]
-            Self::ServicePermission { action } => write!(f, "Permission denied for: {}", action),
-            Self::ServiceCommand { source } => write!(f, "Service command failed: {}", source),
+            Self::OsCommand { program, source } => {
+                write!(f, "Command failed: {}: {}", program, source)
+            }
             Self::NoDeviceFound => write!(f, "No device found"),
             Self::MultipleDevicesFound { count } => {
                 write!(f, "Multiple devices found ({})", count)
             }
+            #[cfg(not(windows))]
             Self::PlatformNotSupported { feature } => {
                 write!(f, "{} not supported on this platform", feature)
             }
             Self::Runtime { .. } => write!(f, "Failed to create runtime"),
+            Self::InstanceAlreadyRunning { lock_path } => write!(
+                f,
+                "oc-bridge is already running (lock: {})",
+                lock_path.display()
+            ),
+            Self::InstanceLock { path, .. } => {
+                write!(f, "Cannot lock instance file: {}", path.display())
+            }
         }
     }
 }

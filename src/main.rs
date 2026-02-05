@@ -8,17 +8,16 @@
 //! ```text
 //! oc-bridge                              Run interactive TUI
 //! oc-bridge -v                           Run with verbose debug output
-//! oc-bridge --daemon                     Run as daemon (Serial, for systemd)
+//! oc-bridge --daemon                     Run background daemon (per-user)
 //! oc-bridge --headless --controller ws   Run headless for WASM apps
 //! oc-bridge --headless --controller udp  Run headless for native apps
-//! oc-bridge install                      Install as system service
-//! oc-bridge uninstall                    Uninstall system service
+//! oc-bridge ctl pause|resume|status       Control running daemon
+//! oc-bridge ctl ping|info                 Query daemon state/info
 //! oc-bridge --help                       Show all options
 //! ```
 
 mod app;
 mod bridge;
-mod bridge_state;
 mod cli;
 mod codec;
 mod config;
@@ -26,9 +25,9 @@ mod constants;
 mod control;
 mod error;
 mod input;
+mod instance_lock;
 mod logging;
 mod platform;
-mod service;
 mod transport;
 mod ui;
 
@@ -46,12 +45,6 @@ use std::sync::Arc;
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Handle service mode first (internal, called by service manager)
-    // Must be handled before tracing init as service mode has its own logging
-    if let Some(Command::Service { port, udp_port }) = cli.command {
-        return service::run_as_service(port.as_deref(), udp_port);
-    }
-
     // Initialize tracing for internal debug output
     logging::init_tracing(cli.verbose);
 
@@ -62,8 +55,28 @@ fn main() -> Result<()> {
         return run_ctl(*cmd, port);
     }
 
-    // Handle daemon mode (uses config file, for systemd service)
+    // Handle daemon mode (background, per-user)
     if cli.daemon {
+        // Ensure a single daemon instance.
+        let _lock = match instance_lock::InstanceLock::acquire_daemon() {
+            Ok(lock) => lock,
+            Err(crate::error::BridgeError::InstanceAlreadyRunning { .. }) => {
+                // Already running is not an error for a background entrypoint.
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+
+        #[cfg(windows)]
+        {
+            // When launched at login / from Explorer, Windows creates a fresh console window
+            // for console-subsystem apps. Hide it so the daemon is not intrusive.
+            //
+            // When launched from an interactive terminal (pwsh/cmd), the console is shared and
+            // we keep it visible.
+            platform::hide_console_window_if_solo();
+        }
+
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| error::BridgeError::Runtime { source: e })?;
         return rt.block_on(run_daemon(cli.verbose, cli.port, cli.udp_port));
@@ -87,31 +100,7 @@ fn main() -> Result<()> {
 
     // Handle subcommands
     match cli.command {
-        // Service management (user-facing)
-        Some(Command::Install(args)) => service::install(
-            args.port.as_deref(),
-            args.udp_port,
-            args.service_name.as_deref(),
-            args.service_exec.as_deref(),
-            args.no_desktop_file,
-        ),
-        Some(Command::Uninstall(args)) => service::uninstall(args.service_name.as_deref()),
-
-        // Internal elevated commands (used by elevation mechanism)
-        Some(Command::InstallService(args)) => service::install_elevated(
-            args.port.as_deref(),
-            args.udp_port,
-            args.service_name.as_deref(),
-            args.service_exec.as_deref(),
-            args.no_desktop_file,
-        ),
-        Some(Command::UninstallService(args)) => {
-            service::uninstall_elevated(args.service_name.as_deref())
-        }
-
         Some(Command::Ctl { .. }) => unreachable!(),
-
-        Some(Command::Service { .. }) => unreachable!(), // Handled above
 
         // Default: run TUI
         None => {
@@ -127,10 +116,9 @@ async fn run_tui() -> Result<()> {
     ui::run(&mut app).await
 }
 
-/// Run the bridge in daemon mode (no TUI, uses config file)
+/// Run the bridge in daemon mode (background, no TUI)
 ///
-/// Designed for systemd service - reads config from default.toml
-/// and uses Serial transport for Teensy hardware.
+/// Uses the per-user config and is intended to be launched by a per-user supervisor (ms-manager).
 async fn run_daemon(verbose: bool, port: Option<String>, udp_port: Option<u16>) -> Result<()> {
     let mut cfg = config::load();
 
@@ -258,12 +246,8 @@ async fn run_headless(
         tokio::sync::mpsc::channel::<logging::LogEntry>(constants::CHANNEL_CAPACITY);
     tokio::spawn(async move {
         while let Some(entry) = log_rx.recv().await {
-            match entry.kind {
-                logging::LogKind::System { message } => {
-                    println!("{} {}", entry.timestamp, message);
-                }
-                // Avoid spamming stdout in headless mode; protocol/debug logs are available in TUI.
-                _ => {}
+            if let logging::LogKind::System { message } = &entry.kind {
+                println!("{} {}", entry.timestamp, message);
             }
         }
     });
@@ -277,6 +261,9 @@ fn run_ctl(cmd: CtlCommand, control_port: u16) -> Result<()> {
         CtlCommand::Pause => "pause",
         CtlCommand::Resume => "resume",
         CtlCommand::Status => "status",
+        CtlCommand::Ping => "ping",
+        CtlCommand::Info => "info",
+        CtlCommand::Shutdown => "shutdown",
     };
 
     let resp = control::send_command_blocking(control_port, cmd_str, timeout)?;
@@ -286,9 +273,24 @@ fn run_ctl(cmd: CtlCommand, control_port: u16) -> Result<()> {
         });
     }
 
-    println!(
-        "ok: cmd={} paused={} serial_open={} port={}",
-        cmd_str, resp.paused, resp.serial_open, control_port
-    );
+    if cmd_str == "info" {
+        println!(
+            "ok: cmd={} paused={} serial_open={} port={} pid={:?} version={:?} config={:?} host_udp={:?} log_udp={:?}",
+            cmd_str,
+            resp.paused,
+            resp.serial_open,
+            control_port,
+            resp.pid,
+            resp.version,
+            resp.config_path,
+            resp.host_udp_port,
+            resp.log_broadcast_port
+        );
+    } else {
+        println!(
+            "ok: cmd={} paused={} serial_open={} port={}",
+            cmd_str, resp.paused, resp.serial_open, control_port
+        );
+    }
     Ok(())
 }
