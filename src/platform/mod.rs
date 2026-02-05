@@ -61,9 +61,9 @@ pub fn configure_serial_low_latency(port: &serialport::COMPort) {
 }
 
 /// Hide the current console window only if we appear to own it (Windows only)
+#[cfg(windows)]
 #[inline]
 pub fn hide_console_window_if_solo() {
-    #[cfg(windows)]
     windows::hide_console_window_if_solo();
 }
 
