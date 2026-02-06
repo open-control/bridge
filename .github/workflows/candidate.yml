@@ -1,0 +1,152 @@
+name: Candidate
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: oc-bridge-linux
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: oc-bridge-windows.exe
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: oc-bridge-macos-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: oc-bridge-macos-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Collect artifact (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/oc-bridge dist/${{ matrix.artifact }}
+
+      - name: Collect artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/oc-bridge.exe dist/${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
+  publish_candidate:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist_flat
+          find dist -maxdepth 5 -type f -print -exec cp '{}' dist_flat/ \;
+          ls -la dist_flat
+
+      - name: Build candidate metadata
+        shell: bash
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          sha256sum dist_flat/* > checksums.txt
+          python - <<'PY'
+          import datetime as dt
+          import hashlib
+          import json
+          from pathlib import Path
+
+          dist = Path("dist_flat")
+          files = sorted(p for p in dist.iterdir() if p.is_file())
+          artifacts = []
+          for p in files:
+              data = p.read_bytes()
+              artifacts.append(
+                  {
+                      "filename": p.name,
+                      "size": len(data),
+                      "sha256": hashlib.sha256(data).hexdigest(),
+                  }
+              )
+
+          payload = {
+              "schema": 1,
+              "repo": __import__("os").environ["GITHUB_REPOSITORY"],
+              "sha": __import__("os").environ["GITHUB_SHA"],
+              "workflow": "candidate.yml",
+              "run_id": int(__import__("os").environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(__import__("os").environ["GITHUB_RUN_ATTEMPT"]),
+              "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+              "artifacts": artifacts,
+          }
+
+          Path("candidate.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Publish draft candidate release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: rc-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist_flat/* candidate.json checksums.txt --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "$TAG" dist_flat/* candidate.json checksums.txt \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "$TAG" \
+              --notes "Candidate artifacts for ${GITHUB_SHA}" \
+              --draft
+          fi
