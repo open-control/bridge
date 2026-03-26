@@ -287,9 +287,14 @@ mod cobs {
 fn test_config_toml_roundtrip() {
     let config_str = r#"
 [bridge]
+instance_id = "bitwig-hw-17081760"
+serial_number = "17081760"
+controller_transport = "serial"
 serial_port = ""
-udp_port = 9000
-transport_mode = "Auto"
+host_transport = "udp"
+host_udp_port = 9000
+control_port = 7999
+log_broadcast_port = 9999
 
 [logs]
 max_entries = 5000
@@ -297,6 +302,11 @@ max_entries = 5000
 
     let parsed: toml::Value = toml::from_str(config_str).expect("Failed to parse TOML");
 
-    assert_eq!(parsed["bridge"]["udp_port"].as_integer(), Some(9000));
-    assert_eq!(parsed["bridge"]["transport_mode"].as_str(), Some("Auto"));
+    assert_eq!(
+        parsed["bridge"]["instance_id"].as_str(),
+        Some("bitwig-hw-17081760")
+    );
+    assert_eq!(parsed["bridge"]["serial_number"].as_str(), Some("17081760"));
+    assert_eq!(parsed["bridge"]["host_udp_port"].as_integer(), Some(9000));
+    assert_eq!(parsed["bridge"]["control_port"].as_integer(), Some(7999));
 }

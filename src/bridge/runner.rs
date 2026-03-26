@@ -14,7 +14,8 @@ use crate::control::{ControlRuntime, ControlState, SerialRunState};
 use crate::error::Result;
 use crate::logging::{self, LogEntry};
 use crate::transport::{
-    SerialTransport, Transport, TransportChannels, UdpTransport, WebSocketTransport,
+    SerialMatchRequest, SerialTransport, Transport, TransportChannels, UdpTransport,
+    WebSocketTransport,
 };
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +47,7 @@ pub(super) async fn run(
         ControlRuntime {
             desired_rx,
             serial_open_tx,
+            resolved_serial_port_tx,
         },
     ) = ControlState::new(
         shutdown.clone(),
@@ -55,6 +57,10 @@ pub(super) async fn run(
             config_path: crate::config::config_path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "".to_string()),
+            instance_id: crate::config::effective_instance_id(config),
+            controller_serial: crate::config::normalized_optional_string(
+                config.serial_number.as_deref(),
+            ),
             host_udp_port: config.host_udp_port,
             log_broadcast_port: config.log_broadcast_port,
             control_port: config.control_port,
@@ -94,19 +100,29 @@ pub(super) async fn run(
     match config.controller_transport {
         ControllerTransport::Serial => {
             let _keepalive = control_keepalive;
-            run_with_serial_controller(config, shutdown, stats, log_tx, desired_rx, serial_open_tx)
-                .await
+            run_with_serial_controller(
+                config,
+                shutdown,
+                stats,
+                log_tx,
+                desired_rx,
+                serial_open_tx,
+                resolved_serial_port_tx,
+            )
+            .await
         }
         ControllerTransport::Udp => {
             drop(control_keepalive);
             drop(desired_rx);
             drop(serial_open_tx);
+            drop(resolved_serial_port_tx);
             run_with_udp_controller(config, shutdown, stats, log_tx).await
         }
         ControllerTransport::WebSocket => {
             drop(control_keepalive);
             drop(desired_rx);
             drop(serial_open_tx);
+            drop(resolved_serial_port_tx);
             run_with_websocket_controller(config, shutdown, stats, log_tx).await
         }
     }
@@ -127,6 +143,7 @@ async fn run_with_serial_controller(
     log_tx: Option<mpsc::Sender<LogEntry>>,
     mut pause_rx: watch::Receiver<SerialRunState>,
     serial_open_tx: watch::Sender<bool>,
+    resolved_serial_port_tx: watch::Sender<Option<String>>,
 ) -> Result<()> {
     // Load device preset if configured
     let device_config = config
@@ -135,6 +152,7 @@ async fn run_with_serial_controller(
         .and_then(|name| crate::config::load_device_preset(name).ok());
 
     let _ = serial_open_tx.send_replace(false);
+    let _ = resolved_serial_port_tx.send_replace(None);
 
     // Create host transport once and keep it alive across serial reconnects/pause.
     let host_transport = create_host_transport(config, shutdown.clone(), &log_tx).await?;
@@ -186,7 +204,13 @@ async fn run_with_serial_controller(
                 continue;
             };
 
-            match SerialTransport::detect(dev_cfg) {
+            let request = SerialMatchRequest {
+                serial_number: crate::config::normalized_optional_string(
+                    config.serial_number.as_deref(),
+                ),
+            };
+
+            match SerialTransport::detect_with_request(dev_cfg, &request) {
                 Ok(p) => {
                     logging::try_log(
                         &log_tx,
@@ -223,6 +247,7 @@ async fn run_with_serial_controller(
         };
 
         let _ = serial_open_tx.send_replace(true);
+        let _ = resolved_serial_port_tx.send_replace(Some(port_name.clone()));
 
         // Create per-session host receiver (subscribe to persistent host transport).
         let mut host_sub = host_bcast_tx.subscribe();
@@ -296,6 +321,7 @@ async fn run_with_serial_controller(
 
         // Session dropped: serial port should be released.
         let _ = serial_open_tx.send_replace(false);
+        let _ = resolved_serial_port_tx.send_replace(None);
 
         // Check if this was a clean shutdown
         if shutdown.load(Ordering::Relaxed) {

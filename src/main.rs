@@ -58,7 +58,12 @@ fn main() -> Result<()> {
     // Handle daemon mode (background, per-user)
     if cli.daemon {
         // Ensure a single daemon instance.
-        let _lock = match instance_lock::InstanceLock::acquire_daemon() {
+        let mut lock_cfg = config::load();
+        if let Some(instance_id) = &cli.instance_id {
+            lock_cfg.bridge.instance_id = Some(instance_id.clone());
+        }
+        let instance_id = config::effective_instance_id(&lock_cfg.bridge);
+        let _lock = match instance_lock::InstanceLock::acquire_daemon(&instance_id) {
             Ok(lock) => lock,
             Err(crate::error::BridgeError::InstanceAlreadyRunning { .. }) => {
                 // Already running is not an error for a background entrypoint.
@@ -82,6 +87,8 @@ fn main() -> Result<()> {
         return rt.block_on(run_daemon(
             cli.verbose,
             cli.port,
+            cli.instance_id,
+            cli.serial_number,
             cli.udp_port,
             cli.daemon_control_port,
             cli.daemon_log_broadcast_port,
@@ -128,6 +135,8 @@ async fn run_tui() -> Result<()> {
 async fn run_daemon(
     verbose: bool,
     port: Option<String>,
+    instance_id: Option<String>,
+    serial_number: Option<String>,
     udp_port: Option<u16>,
     control_port: Option<u16>,
     log_broadcast_port: Option<u16>,
@@ -135,6 +144,12 @@ async fn run_daemon(
     let mut cfg = config::load();
 
     // Apply CLI overrides (useful for systemd unit files)
+    if let Some(instance_id) = instance_id {
+        cfg.bridge.instance_id = Some(instance_id);
+    }
+    if let Some(serial_number) = serial_number {
+        cfg.bridge.serial_number = Some(serial_number);
+    }
     if let Some(port) = port {
         cfg.bridge.serial_port = port;
     }
@@ -154,7 +169,9 @@ async fn run_daemon(
     let controller_info = match cfg.bridge.controller_transport {
         ControllerTransport::Serial => {
             let port = config::detect_serial(&cfg).unwrap_or_else(|| "(auto-detect)".to_string());
-            format!("Serial:{}", port)
+            let serial = config::normalized_optional_string(cfg.bridge.serial_number.as_deref())
+                .unwrap_or_else(|| "(any compatible)".to_string());
+            format!("Serial:{} target={}", port, serial)
         }
         ControllerTransport::Udp => format!("UDP:{}", cfg.bridge.controller_udp_port),
         ControllerTransport::WebSocket => format!("WS:{}", cfg.bridge.controller_websocket_port),
@@ -170,6 +187,10 @@ async fn run_daemon(
     };
 
     println!("oc-bridge daemon mode");
+    println!(
+        "  Instance:   {}",
+        config::effective_instance_id(&cfg.bridge)
+    );
     println!("  Controller: {}", controller_info);
     println!("  Host:       {}", host_info);
     if verbose {
@@ -205,7 +226,10 @@ async fn run_daemon(
     } else {
         match crate::config::config_dir() {
             Ok(d) => {
-                let path = d.join("bridge.log");
+                let path = d.join(format!(
+                    "bridge.{}.log",
+                    config::effective_instance_id(&cfg.bridge)
+                ));
                 match logging::file::spawn_file_logger(logging::file::FileLoggerConfig {
                     path,
                     max_bytes: cfg.logs.file_max_bytes,
@@ -349,7 +373,7 @@ fn run_ctl(cmd: CtlCommand, control_port: u16) -> Result<()> {
 
     if cmd_str == "info" {
         println!(
-            "ok: cmd={} paused={} serial_open={} port={} pid={:?} version={:?} config={:?} host_udp={:?} log_udp={:?}",
+            "ok: cmd={} paused={} serial_open={} port={} pid={:?} version={:?} config={:?} instance_id={:?} controller_serial={:?} resolved_serial_port={:?} host_udp={:?} log_udp={:?}",
             cmd_str,
             resp.paused,
             resp.serial_open,
@@ -357,6 +381,9 @@ fn run_ctl(cmd: CtlCommand, control_port: u16) -> Result<()> {
             resp.pid,
             resp.version,
             resp.config_path,
+            resp.instance_id,
+            resp.controller_serial,
+            resp.resolved_serial_port,
             resp.host_udp_port,
             resp.log_broadcast_port
         );

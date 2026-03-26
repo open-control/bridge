@@ -7,6 +7,8 @@
 # =============================================================================
 
 [bridge]
+instance_id = "default"
+serial_number = ""
 controller_transport = "serial"
 serial_port = ""
 device_preset = "teensy"
@@ -29,7 +31,7 @@ max_entries = 200
 export_max = 2000
 
 # Persistent file logs (rotating).
-# Written to the per-user config directory as bridge.log (plus bridge.log.1..N).
+# Written to the per-user config directory as bridge.<instance_id>.log.
 file_enabled = true
 file_max_bytes = 5000000
 file_max_files = 3

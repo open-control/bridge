@@ -36,6 +36,7 @@ impl SerialRunState {
 pub struct ControlState {
     desired_tx: watch::Sender<SerialRunState>,
     serial_open_rx: watch::Receiver<bool>,
+    resolved_serial_port_rx: watch::Receiver<Option<String>>,
     shutdown: Arc<AtomicBool>,
     info: ControlInfo,
 }
@@ -43,6 +44,7 @@ pub struct ControlState {
 pub struct ControlRuntime {
     pub desired_rx: watch::Receiver<SerialRunState>,
     pub serial_open_tx: watch::Sender<bool>,
+    pub resolved_serial_port_tx: watch::Sender<Option<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +52,8 @@ pub struct ControlInfo {
     pub pid: u32,
     pub version: String,
     pub config_path: String,
+    pub instance_id: String,
+    pub controller_serial: Option<String>,
     pub host_udp_port: u16,
     pub log_broadcast_port: u16,
     pub control_port: u16,
@@ -60,16 +64,19 @@ impl ControlState {
     pub fn new(shutdown: Arc<AtomicBool>, info: ControlInfo) -> (Self, ControlRuntime) {
         let (desired_tx, desired_rx) = watch::channel(SerialRunState::Running);
         let (serial_open_tx, serial_open_rx) = watch::channel(false);
+        let (resolved_serial_port_tx, resolved_serial_port_rx) = watch::channel(None);
         (
             Self {
                 desired_tx,
                 serial_open_rx,
+                resolved_serial_port_rx,
                 shutdown,
                 info,
             },
             ControlRuntime {
                 desired_rx,
                 serial_open_tx,
+                resolved_serial_port_tx,
             },
         )
     }
@@ -84,6 +91,10 @@ impl ControlState {
 
     pub fn serial_open(&self) -> bool {
         *self.serial_open_rx.borrow()
+    }
+
+    pub fn resolved_serial_port(&self) -> Option<String> {
+        self.resolved_serial_port_rx.borrow().clone()
     }
 
     pub fn request_shutdown(&self) {
@@ -117,6 +128,12 @@ pub struct Response {
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_serial: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_serial_port: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_udp_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -227,6 +244,19 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
         }
     }
 
+    let out = serde_json::to_vec(&build_response(&cmd, &state, ok, message)).map_err(|e| {
+        BridgeError::ControlProtocol {
+            message: e.to_string(),
+        }
+    })?;
+
+    let _ = stream.write_all(&out).await;
+    let _ = stream.write_all(b"\n").await;
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
+fn build_response(cmd: &str, state: &ControlState, ok: bool, message: Option<String>) -> Response {
     let paused = state.desired().is_paused();
     let serial_open = state.serial_open();
 
@@ -239,6 +269,9 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
         pid: None,
         version: None,
         config_path: None,
+        instance_id: None,
+        controller_serial: None,
+        resolved_serial_port: None,
         host_udp_port: None,
         log_broadcast_port: None,
         control_port: None,
@@ -249,18 +282,14 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
         resp.pid = Some(info.pid);
         resp.version = Some(info.version.clone());
         resp.config_path = Some(info.config_path.clone());
+        resp.instance_id = Some(info.instance_id.clone());
+        resp.controller_serial = info.controller_serial.clone();
+        resp.resolved_serial_port = state.resolved_serial_port();
         resp.host_udp_port = Some(info.host_udp_port);
         resp.log_broadcast_port = Some(info.log_broadcast_port);
         resp.control_port = Some(info.control_port);
     }
-    let out = serde_json::to_vec(&resp).map_err(|e| BridgeError::ControlProtocol {
-        message: e.to_string(),
-    })?;
-
-    let _ = stream.write_all(&out).await;
-    let _ = stream.write_all(b"\n").await;
-    let _ = stream.shutdown().await;
-    Ok(())
+    resp
 }
 
 pub fn send_command_blocking(
@@ -307,4 +336,35 @@ pub fn send_command_blocking(
         message: format!("invalid response: {e}"),
     })?;
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_control_info_status_includes_instance_identity() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let info = ControlInfo {
+            pid: 42,
+            version: "1.2.3".to_string(),
+            config_path: "C:/config.toml".to_string(),
+            instance_id: "bitwig-hw-17081760".to_string(),
+            controller_serial: Some("17081760".to_string()),
+            host_udp_port: 9000,
+            log_broadcast_port: 9999,
+            control_port: 7999,
+            serial_supported: true,
+        };
+        let (state, runtime) = ControlState::new(shutdown, info);
+        let _ = runtime.serial_open_tx.send_replace(true);
+        let _ = runtime
+            .resolved_serial_port_tx
+            .send_replace(Some("COM3".to_string()));
+
+        let response = build_response("info", &state, true, None);
+        assert_eq!(response.instance_id, Some("bitwig-hw-17081760".to_string()));
+        assert_eq!(response.controller_serial, Some("17081760".to_string()));
+        assert_eq!(response.resolved_serial_port, Some("COM3".to_string()));
+    }
 }

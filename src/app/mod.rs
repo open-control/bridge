@@ -291,7 +291,7 @@ fn determine_controller_state(
     match cfg.bridge.controller_transport {
         ControllerTransport::Serial => {
             if serial_open {
-                let port = config::detect_serial(cfg).unwrap_or_else(|| "(auto)".to_string());
+                let port = config::detect_serial(cfg).unwrap_or_else(|| "(waiting)".to_string());
                 ControllerTransportState::Serial { port }
             } else {
                 ControllerTransportState::Waiting

@@ -19,7 +19,7 @@ pub mod serial;
 pub mod udp;
 pub mod websocket;
 
-pub use serial::SerialTransport;
+pub use serial::{SerialMatchRequest, SerialTransport};
 pub use udp::UdpTransport;
 pub use websocket::WebSocketTransport;
 

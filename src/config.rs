@@ -59,28 +59,6 @@ pub struct PlatformNameHint {
     pub linux: Option<String>,
 }
 
-impl PlatformNameHint {
-    /// Returns the hint for the current platform
-    pub fn current(&self) -> Option<&str> {
-        #[cfg(windows)]
-        {
-            self.windows.as_deref()
-        }
-        #[cfg(target_os = "macos")]
-        {
-            self.macos.as_deref()
-        }
-        #[cfg(target_os = "linux")]
-        {
-            self.linux.as_deref()
-        }
-        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-        {
-            None
-        }
-    }
-}
-
 /// Wrapper for device preset file format
 #[derive(Debug, Deserialize)]
 struct DevicePresetFile {
@@ -155,6 +133,14 @@ pub enum HostTransport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BridgeConfig {
+    /// Stable logical identifier for this bridge instance.
+    #[serde(default = "default_instance_id")]
+    pub instance_id: Option<String>,
+
+    /// USB serial number used to bind the bridge to a specific controller.
+    #[serde(default)]
+    pub serial_number: Option<String>,
+
     // =========================================================================
     // Controller Side (source of MIDI messages)
     // =========================================================================
@@ -255,6 +241,8 @@ pub struct UiConfig {
 impl Default for BridgeConfig {
     fn default() -> Self {
         Self {
+            instance_id: default_instance_id(),
+            serial_number: None,
             // Controller side
             controller_transport: ControllerTransport::Serial,
             serial_port: String::new(),
@@ -272,6 +260,10 @@ impl Default for BridgeConfig {
             control_port: DEFAULT_CONTROL_PORT,
         }
     }
+}
+
+fn default_instance_id() -> Option<String> {
+    Some("default".to_string())
 }
 
 impl Default for LogsConfig {
@@ -347,6 +339,33 @@ pub fn config_dir() -> Result<PathBuf> {
 
 pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.toml"))
+}
+
+pub fn normalized_optional_string(value: Option<&str>) -> Option<String> {
+    value.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
+
+pub fn effective_instance_id(cfg: &BridgeConfig) -> String {
+    let raw = normalized_optional_string(cfg.instance_id.as_deref())
+        .unwrap_or_else(|| "default".to_string());
+    let normalized: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if normalized.is_empty() {
+        "default".to_string()
+    } else {
+        normalized
+    }
 }
 
 pub fn devices_dir() -> Result<PathBuf> {
@@ -498,8 +517,15 @@ pub fn detect_serial(cfg: &Config) -> Option<String> {
         .device_preset
         .as_ref()
         .and_then(|name| load_device_preset(name).ok())?;
+    if normalized_optional_string(cfg.bridge.serial_number.as_deref()).is_none() {
+        return SerialTransport::detect(&device_config).ok();
+    }
 
-    SerialTransport::detect(&device_config).ok()
+    let request = crate::transport::SerialMatchRequest {
+        serial_number: normalized_optional_string(cfg.bridge.serial_number.as_deref()),
+    };
+
+    SerialTransport::detect_with_request(&device_config, &request).ok()
 }
 
 // ============================================================================
@@ -519,6 +545,8 @@ mod tests {
         let config = BridgeConfig::default();
 
         // Controller side
+        assert_eq!(config.instance_id, Some("default".to_string()));
+        assert_eq!(config.serial_number, None);
         assert_eq!(config.controller_transport, ControllerTransport::Serial);
         assert_eq!(config.serial_port, "");
         assert_eq!(config.device_preset, Some("teensy".to_string()));
@@ -663,6 +691,8 @@ mod tests {
     fn test_config_serialize_deserialize_roundtrip() {
         let config = Config {
             bridge: BridgeConfig {
+                instance_id: Some("bitwig-hw-17081760".to_string()),
+                serial_number: Some("17081760".to_string()),
                 controller_transport: ControllerTransport::Udp,
                 serial_port: "COM3".to_string(),
                 device_preset: Some("teensy".to_string()),
@@ -695,6 +725,11 @@ mod tests {
             restored.bridge.controller_transport,
             ControllerTransport::Udp
         );
+        assert_eq!(
+            restored.bridge.instance_id,
+            Some("bitwig-hw-17081760".to_string())
+        );
+        assert_eq!(restored.bridge.serial_number, Some("17081760".to_string()));
         assert_eq!(restored.bridge.serial_port, "COM3");
         assert_eq!(restored.bridge.device_preset, Some("teensy".to_string()));
         assert_eq!(restored.bridge.controller_udp_port, 9103);
@@ -726,6 +761,8 @@ host_udp_port = 9500
         assert_eq!(config.bridge.controller_transport, ControllerTransport::Udp);
         assert_eq!(config.bridge.host_udp_port, 9500);
         // Rest should be defaults
+        assert_eq!(config.bridge.instance_id, Some("default".to_string()));
+        assert_eq!(config.bridge.serial_number, None);
         assert_eq!(config.bridge.serial_port, "");
         assert_eq!(config.bridge.host_transport, HostTransport::Udp);
         assert_eq!(
@@ -743,9 +780,18 @@ host_udp_port = 9500
             config.bridge.controller_transport,
             ControllerTransport::Serial
         );
+        assert_eq!(config.bridge.instance_id, Some("default".to_string()));
+        assert_eq!(config.bridge.serial_number, None);
         assert_eq!(config.bridge.host_transport, HostTransport::Udp);
         assert_eq!(config.bridge.host_udp_port, DEFAULT_HOST_UDP_PORT);
         assert_eq!(config.logs.max_entries, 200);
         assert_eq!(config.ui.default_filter, "All");
+    }
+
+    #[test]
+    fn test_effective_instance_id_sanitizes_invalid_chars() {
+        let mut config = BridgeConfig::default();
+        config.instance_id = Some(" bitwig hw/17081760 ".to_string());
+        assert_eq!(effective_instance_id(&config), "bitwig_hw_17081760");
     }
 }

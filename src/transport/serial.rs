@@ -44,6 +44,21 @@ pub struct SerialTransport {
     port_name: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SerialMatchRequest {
+    pub serial_number: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SerialDeviceCandidate {
+    pub port_name: String,
+    pub serial_number: Option<String>,
+    pub manufacturer: Option<String>,
+    pub product: Option<String>,
+    pub vid: u16,
+    pub pid: u16,
+}
+
 impl SerialTransport {
     /// Create a new serial transport for the specified port
     pub fn new(port_name: impl Into<String>) -> Self {
@@ -54,24 +69,28 @@ impl SerialTransport {
 
     /// Detect a USB device matching the given configuration
     ///
-    /// Searches available serial ports for a device matching the VID/PID
-    /// specified in the config. Falls back to name pattern matching if
-    /// VID/PID info is not available.
+    /// Searches available USB serial ports for a device matching the VID/PID
+    /// specified in the config, plus any identity filters from the request.
     ///
     /// # Errors
     ///
     /// - `NoDeviceFound` - No matching device found
     /// - `MultipleDevicesFound` - More than one matching device found
     pub fn detect(config: &DeviceConfig) -> Result<String> {
+        Self::detect_with_request(config, &SerialMatchRequest::default())
+    }
+
+    pub fn detect_with_request(
+        config: &DeviceConfig,
+        request: &SerialMatchRequest,
+    ) -> Result<String> {
         let ports = serialport::available_ports().unwrap_or_default();
+        let candidates = ports
+            .iter()
+            .filter_map(candidate_from_port)
+            .collect::<Vec<_>>();
 
-        let matching: Vec<_> = ports.iter().filter(|p| matches_device(p, config)).collect();
-
-        match matching.len() {
-            0 => Err(BridgeError::NoDeviceFound),
-            1 => Ok(matching[0].port_name.clone()),
-            n => Err(BridgeError::MultipleDevicesFound { count: n }),
-        }
+        select_candidate(&candidates, config, request).map(|candidate| candidate.port_name.clone())
     }
 
     /// Open a serial port for USB CDC communication
@@ -107,18 +126,46 @@ impl SerialTransport {
     }
 }
 
-/// Check if a serial port matches the device configuration
-fn matches_device(port: &SerialPortInfo, config: &DeviceConfig) -> bool {
+fn candidate_from_port(port: &SerialPortInfo) -> Option<SerialDeviceCandidate> {
     match &port.port_type {
-        SerialPortType::UsbPort(usb) => usb.vid == config.vid && config.pid_list.contains(&usb.pid),
-        _ => {
-            // Fallback: name pattern matching if available
-            config
-                .name_hint
-                .current()
-                .map(|hint| port.port_name.contains(hint))
-                .unwrap_or(false)
-        }
+        SerialPortType::UsbPort(usb) => Some(SerialDeviceCandidate {
+            port_name: port.port_name.clone(),
+            serial_number: usb.serial_number.clone(),
+            manufacturer: usb.manufacturer.clone(),
+            product: usb.product.clone(),
+            vid: usb.vid,
+            pid: usb.pid,
+        }),
+        _ => None,
+    }
+}
+
+fn matches_device_config(candidate: &SerialDeviceCandidate, config: &DeviceConfig) -> bool {
+    candidate.vid == config.vid && config.pid_list.contains(&candidate.pid)
+}
+
+fn matches_request(candidate: &SerialDeviceCandidate, request: &SerialMatchRequest) -> bool {
+    match request.serial_number.as_ref() {
+        Some(serial) => candidate.serial_number.as_ref() == Some(serial),
+        None => true,
+    }
+}
+
+fn select_candidate<'a>(
+    candidates: &'a [SerialDeviceCandidate],
+    config: &DeviceConfig,
+    request: &SerialMatchRequest,
+) -> Result<&'a SerialDeviceCandidate> {
+    let matching = candidates
+        .iter()
+        .filter(|candidate| matches_device_config(candidate, config))
+        .filter(|candidate| matches_request(candidate, request))
+        .collect::<Vec<_>>();
+
+    match matching.len() {
+        0 => Err(BridgeError::NoDeviceFound),
+        1 => Ok(matching[0]),
+        n => Err(BridgeError::MultipleDevicesFound { count: n }),
     }
 }
 
@@ -213,6 +260,7 @@ impl Transport for SerialTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PlatformNameHint;
 
     #[test]
     fn test_serial_transport_new() {
@@ -224,5 +272,72 @@ mod tests {
     fn test_serial_transport_from_string() {
         let transport = SerialTransport::new(String::from("/dev/ttyACM0"));
         assert_eq!(transport.port_name, "/dev/ttyACM0");
+    }
+
+    fn device_config() -> DeviceConfig {
+        DeviceConfig {
+            name: "Teensy".to_string(),
+            vid: 0x16C0,
+            pid_list: vec![0x0489],
+            name_hint: PlatformNameHint::default(),
+            udev_rules: None,
+            udev_rules_filename: None,
+        }
+    }
+
+    fn candidate(port_name: &str, serial_number: Option<&str>) -> SerialDeviceCandidate {
+        SerialDeviceCandidate {
+            port_name: port_name.to_string(),
+            serial_number: serial_number.map(|value| value.to_string()),
+            manufacturer: Some("petitechose.audio".to_string()),
+            product: Some("MIDI Studio [hw]".to_string()),
+            vid: 0x16C0,
+            pid: 0x0489,
+        }
+    }
+
+    #[test]
+    fn test_select_candidate_without_serial_returns_multiple_when_two_match() {
+        let candidates = vec![
+            candidate("COM3", Some("17081760")),
+            candidate("COM6", Some("17076520")),
+        ];
+        let err = select_candidate(&candidates, &device_config(), &SerialMatchRequest::default())
+            .unwrap_err();
+        assert!(matches!(err, BridgeError::MultipleDevicesFound { count: 2 }));
+    }
+
+    #[test]
+    fn test_select_candidate_with_matching_serial_returns_correct_port() {
+        let candidates = vec![
+            candidate("COM3", Some("17081760")),
+            candidate("COM6", Some("17076520")),
+        ];
+        let request = SerialMatchRequest {
+            serial_number: Some("17076520".to_string()),
+        };
+        let selected = select_candidate(&candidates, &device_config(), &request).unwrap();
+        assert_eq!(selected.port_name, "COM6");
+    }
+
+    #[test]
+    fn test_select_candidate_with_missing_serial_returns_no_device_found() {
+        let candidates = vec![
+            candidate("COM3", Some("17081760")),
+            candidate("COM6", Some("17076520")),
+        ];
+        let request = SerialMatchRequest {
+            serial_number: Some("missing".to_string()),
+        };
+        let err = select_candidate(&candidates, &device_config(), &request).unwrap_err();
+        assert!(matches!(err, BridgeError::NoDeviceFound));
+    }
+
+    #[test]
+    fn test_matches_request_rejects_wrong_serial() {
+        let request = SerialMatchRequest {
+            serial_number: Some("17081760".to_string()),
+        };
+        assert!(!matches_request(&candidate("COM6", Some("17076520")), &request));
     }
 }

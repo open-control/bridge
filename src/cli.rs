@@ -79,6 +79,14 @@ pub struct Cli {
     #[arg(long, value_name = "PORT")]
     pub port: Option<String>,
 
+    /// Stable logical identifier for this bridge instance
+    #[arg(long, value_name = "ID")]
+    pub instance_id: Option<String>,
+
+    /// USB serial number of the controller to target
+    #[arg(long, value_name = "SERIAL")]
+    pub serial_number: Option<String>,
+
     /// UDP port for host communication (default: 9000)
     #[arg(long, value_name = "PORT")]
     pub udp_port: Option<u16>,
@@ -189,6 +197,19 @@ mod tests {
     fn test_cli_parse_port() {
         let cli = Cli::parse_from(["oc-bridge", "--port", "COM3"]);
         assert_eq!(cli.port, Some("COM3".to_string()));
+    }
+
+    #[test]
+    fn test_cli_parse_instance_id_and_serial_number() {
+        let cli = Cli::parse_from([
+            "oc-bridge",
+            "--instance-id",
+            "bitwig-hw-17081760",
+            "--serial-number",
+            "17081760",
+        ]);
+        assert_eq!(cli.instance_id, Some("bitwig-hw-17081760".to_string()));
+        assert_eq!(cli.serial_number, Some("17081760".to_string()));
     }
 
     #[test]
