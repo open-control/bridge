@@ -10,6 +10,7 @@
 //! - Transport lifecycle (that's the caller's responsibility)
 //! - Reconnection logic (handled by the bridge main loop)
 
+use super::guard::{GuardAction, RelayGuard};
 use super::protocol::parse_message_name;
 use super::stats::Stats;
 use crate::codec::{Codec, Frame};
@@ -19,6 +20,7 @@ use crate::transport::TransportChannels;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 /// Bridge session between controller and host transports
@@ -58,6 +60,10 @@ pub struct BridgeSession<C: Codec> {
     stats: Arc<Stats>,
     /// Log sender (optional)
     log_tx: Option<mpsc::Sender<LogEntry>>,
+    /// Message guard for flood-prone paths
+    guard: RelayGuard,
+    /// Monotonic time reference for guard intervals
+    start_time: Instant,
 }
 
 impl<C: Codec> BridgeSession<C> {
@@ -75,7 +81,14 @@ impl<C: Codec> BridgeSession<C> {
             controller_codec,
             stats,
             log_tx,
+            guard: RelayGuard::default(),
+            start_time: Instant::now(),
         }
+    }
+
+    pub fn with_duplicate_guard(mut self, enabled: bool, duplicate_window_ms: u64) -> Self {
+        self.guard = RelayGuard::new(enabled, duplicate_window_ms);
+        self
     }
 
     /// Run the bridge session until shutdown or disconnect
@@ -126,6 +139,8 @@ impl<C: Codec> BridgeSession<C> {
     ///
     /// Decodes using controller codec, logs, updates stats, sends to host.
     fn relay_controller_to_host(&mut self, data: Bytes) {
+        let now_ms = self.elapsed_ms();
+
         // Decode data from controller (may produce multiple frames)
         self.controller_codec.decode(&data, |frame| {
             match frame {
@@ -138,8 +153,14 @@ impl<C: Codec> BridgeSession<C> {
                         let _ = tx.try_send(LogEntry::protocol_in(&name, payload.len()));
                     }
 
-                    // Send raw payload to host (no encoding needed for UDP)
-                    let _ = self.host.tx.try_send(payload);
+                    match self.guard.on_controller_message(payload, now_ms) {
+                        GuardAction::Forward(payload) => {
+                            let _ = self.host.tx.try_send(payload);
+                        }
+                        GuardAction::DropDuplicate => {
+                            self.stats.add_c2h_duplicate_drop();
+                        }
+                    }
                 }
                 Frame::DebugLog { level, message } => {
                     // Forward debug logs from controller firmware (silently drop if channel full)
@@ -155,6 +176,8 @@ impl<C: Codec> BridgeSession<C> {
     ///
     /// Parses message name for logging, updates stats, encodes and sends to controller.
     fn relay_host_to_controller(&mut self, data: Bytes) {
+        let now_ms = self.elapsed_ms();
+
         // Parse message name from raw payload for logging
         let name = parse_message_name(&data).unwrap_or_else(|| "unknown".into());
 
@@ -168,12 +191,25 @@ impl<C: Codec> BridgeSession<C> {
             "protocol_out",
         );
 
+        match self.guard.on_host_message(data, now_ms) {
+            GuardAction::Forward(payload) => self.send_to_controller(payload),
+            GuardAction::DropDuplicate => {
+                self.stats.add_h2c_duplicate_drop();
+            }
+        }
+    }
+
+    fn send_to_controller(&mut self, data: Bytes) {
         // Encode for controller transport (e.g., COBS for Serial)
         let mut encoded = Vec::with_capacity(data.len() + 16);
         self.controller_codec.encode(&data, &mut encoded);
 
         // Send to controller (silently drop if channel full)
         let _ = self.controller.tx.try_send(Bytes::from(encoded));
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.start_time.elapsed().as_millis() as u64
     }
 }
 

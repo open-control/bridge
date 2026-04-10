@@ -25,6 +25,10 @@ pub struct Stats {
     tx_rate: AtomicU64,
     /// Cached RX rate in bytes/sec (stored as f64 bits)
     rx_rate: AtomicU64,
+    /// Number of controller -> host messages dropped as exact duplicates
+    c2h_duplicate_drops: AtomicU64,
+    /// Number of host -> controller messages dropped as exact duplicates
+    h2c_duplicate_drops: AtomicU64,
 }
 
 impl Stats {
@@ -38,6 +42,8 @@ impl Stats {
             last_calc_nanos: AtomicU64::new(0),
             tx_rate: AtomicU64::new(0),
             rx_rate: AtomicU64::new(0),
+            c2h_duplicate_drops: AtomicU64::new(0),
+            h2c_duplicate_drops: AtomicU64::new(0),
         }
     }
 
@@ -53,6 +59,16 @@ impl Stats {
         self.rx_total.fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
+    #[inline]
+    pub fn add_c2h_duplicate_drop(&self) {
+        self.c2h_duplicate_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn add_h2c_duplicate_drop(&self) {
+        self.h2c_duplicate_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Get total transmitted bytes
     #[inline]
     #[allow(dead_code)] // Used in tests
@@ -65,6 +81,18 @@ impl Stats {
     #[allow(dead_code)] // Used in tests
     pub fn rx_bytes(&self) -> u64 {
         self.rx_total.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn c2h_duplicate_drops(&self) -> u64 {
+        self.c2h_duplicate_drops.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn h2c_duplicate_drops(&self) -> u64 {
+        self.h2c_duplicate_drops.load(Ordering::Relaxed)
     }
 
     /// Update rate calculations and return (tx_kb_s, rx_kb_s)

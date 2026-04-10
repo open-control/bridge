@@ -25,6 +25,7 @@
 //! - `stats` - Lock-free traffic counters
 //! - `protocol` - Message name parsing
 
+pub mod guard;
 pub mod protocol;
 pub mod session;
 pub mod stats;

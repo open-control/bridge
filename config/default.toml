@@ -25,6 +25,8 @@ host_udp_port = 9000
 host_websocket_port = 8000
 
 log_broadcast_port = 9999
+duplicate_guard_enabled = true
+duplicate_guard_window_ms = 12
 
 [logs]
 max_entries = 200

@@ -191,6 +191,12 @@ pub struct BridgeConfig {
     ///
     /// Binds to 127.0.0.1 only.
     pub control_port: u16,
+
+    /// Enable generic exact-duplicate protection in the relay.
+    pub duplicate_guard_enabled: bool,
+
+    /// Duplicate suppression window, in milliseconds, for identical payloads per direction.
+    pub duplicate_guard_window_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,6 +264,8 @@ impl Default for BridgeConfig {
 
             // Control
             control_port: DEFAULT_CONTROL_PORT,
+            duplicate_guard_enabled: true,
+            duplicate_guard_window_ms: 12,
         }
     }
 }
@@ -703,6 +711,8 @@ mod tests {
                 host_websocket_port: 9102,
                 log_broadcast_port: 9105,
                 control_port: 9106,
+                duplicate_guard_enabled: true,
+                duplicate_guard_window_ms: 12,
             },
             logs: LogsConfig {
                 max_entries: 500,
@@ -739,6 +749,8 @@ mod tests {
         assert_eq!(restored.bridge.host_transport, HostTransport::Both);
         assert_eq!(restored.bridge.host_udp_port, 9101);
         assert_eq!(restored.bridge.host_websocket_port, 9102);
+        assert!(restored.bridge.duplicate_guard_enabled);
+        assert_eq!(restored.bridge.duplicate_guard_window_ms, 12);
 
         // Verify logs
         assert_eq!(restored.bridge.log_broadcast_port, 9105);
