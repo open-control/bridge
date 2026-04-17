@@ -15,7 +15,7 @@ impl InstanceLock {
     }
 
     fn lock_path_in_dir(dir: &Path, instance_id: &str) -> Result<PathBuf> {
-        std::fs::create_dir_all(&dir).map_err(|e| BridgeError::Io {
+        std::fs::create_dir_all(dir).map_err(|e| BridgeError::Io {
             path: dir.to_path_buf(),
             source: e,
         })?;
@@ -77,7 +77,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir().join(format!("oc-bridge-lock-test-{}-{}", std::process::id(), stamp))
+        std::env::temp_dir().join(format!(
+            "oc-bridge-lock-test-{}-{}",
+            std::process::id(),
+            stamp
+        ))
     }
 
     fn acquire_daemon_in_dir(instance_id: &str, dir: &Path) -> Result<InstanceLock> {
