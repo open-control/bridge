@@ -47,10 +47,8 @@ pub async fn run(app: &mut App) -> Result<()> {
         // Handle input with timeout
         if event::poll(std::time::Duration::from_millis(FRAME_DURATION_MS)).map_err(map_io_err)? {
             match event::read().map_err(map_io_err)? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if app.handle_key(key) {
-                        break;
-                    }
+                Event::Key(key) if key.kind == KeyEventKind::Press && app.handle_key(key) => {
+                    break;
                 }
                 Event::Mouse(mouse) => match mouse.kind {
                     MouseEventKind::ScrollUp => app.handle_scroll(true),
