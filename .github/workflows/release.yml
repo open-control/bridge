@@ -1,46 +1,90 @@
 name: Release
 
+run-name: Release ${{ inputs.tag || github.ref_name }} / ${{ inputs.request_id || 'tag' }}
+
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.1)"
+        required: true
+        type: string
+      source_sha:
+        description: "Source commit SHA (candidate tag is rc-<sha>)"
+        required: true
+        type: string
+      request_id:
+        description: "Optional dispatch correlation id"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: true
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact: oc-bridge-linux
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: oc-bridge-windows.exe
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            artifact: oc-bridge-macos-x64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: oc-bridge-macos-arm64
-
-    runs-on: ${{ matrix.os }}
-
+  promote:
+    name: promote release
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Validate tag matches Cargo version
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Resolve release variables
+        id: vars
         shell: bash
         run: |
-          tag="${GITHUB_REF_NAME}"
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            release_tag="${{ inputs.tag }}"
+            source_sha="${{ inputs.source_sha }}"
+          else
+            release_tag="${GITHUB_REF_NAME}"
+            source_sha="${GITHUB_SHA}"
+          fi
+
+          if ! [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid source_sha: $source_sha" >&2
+            exit 1
+          fi
+
+          candidate_tag="rc-${source_sha}"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_tag=$candidate_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout source SHA
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.vars.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Validate source SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          if [ "$sha" != "${{ steps.vars.outputs.source_sha }}" ]; then
+            echo "Checked out SHA does not match resolved source SHA" >&2
+            echo "resolved=${{ steps.vars.outputs.source_sha }}" >&2
+            echo "head=$sha" >&2
+            exit 1
+          fi
+
+      - name: Validate tag matches Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.vars.outputs.release_tag }}"
           cargo_version=$(python -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['package']['version'])")
           expected="v${cargo_version}"
           if [ "$tag" != "$expected" ]; then
@@ -48,52 +92,94 @@ jobs:
             exit 1
           fi
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Rename artifact (Unix)
-        if: runner.os != 'Windows'
+      - name: Wait for candidate release
+        shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/oc-bridge ${{ matrix.artifact }}
+          set -euo pipefail
+          tag="${{ steps.vars.outputs.candidate_tag }}"
+          echo "Waiting for candidate release: ${tag}"
+          for _ in $(seq 1 180); do
+            if gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              echo "Candidate found"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Timed out waiting for candidate release ${tag}" >&2
+          exit 1
 
-      - name: Rename artifact (Windows)
-        if: runner.os == 'Windows'
+      - name: Download candidate assets
+        shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/oc-bridge.exe ${{ matrix.artifact }}
+          set -euo pipefail
+          mkdir -p artifacts
+          gh release download "${{ steps.vars.outputs.candidate_tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir artifacts
+          ls -la artifacts
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
+      - name: Checkout ms-dev-env
+        uses: actions/checkout@v6
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          repository: petitechose-midi-studio/ms-dev-env
+          ref: main
+          path: workspace
 
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v3
+      - name: Setup ms runtime
+        uses: ./workspace/.github/actions/setup-ms-runtime
         with:
-          files: |
-            oc-bridge-linux/oc-bridge-linux
-            oc-bridge-windows.exe/oc-bridge-windows.exe
-            oc-bridge-macos-x64/oc-bridge-macos-x64
-            oc-bridge-macos-arm64/oc-bridge-macos-arm64
-          generate_release_notes: true
+          working-directory: workspace
+
+      - name: Build expected candidate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > artifacts/input-repos.json <<'EOF'
+          [
+            {
+              "id": "oc-bridge",
+              "repo": "open-control/bridge",
+              "sha": "${{ steps.vars.outputs.source_sha }}"
+            }
+          ]
+          EOF
+
+      - name: Verify signed candidate metadata
+        shell: bash
+        working-directory: workspace
+        env:
+          MS_CANDIDATE_ED25519_PK: ${{ vars.MS_CANDIDATE_ED25519_PK }}
+        run: |
+          set -euo pipefail
+          uv run ms release candidate verify \
+            --artifacts-dir ../artifacts \
+            --manifest-path ../artifacts/candidate.json \
+            --checksums-path ../artifacts/checksums.txt \
+            --sig-path ../artifacts/candidate.json.sig \
+            --expected-producer-repo open-control/bridge \
+            --expected-producer-kind oc-bridge-binaries \
+            --expected-workflow-file .github/workflows/candidate.yml \
+            --expected-input-repos-json ../artifacts/input-repos.json
+
+      - name: Publish final release from candidate assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="${{ steps.vars.outputs.release_tag }}"
+          files=(
+            artifacts/oc-bridge-linux-x86_64
+            artifacts/oc-bridge-windows-x86_64.exe
+            artifacts/oc-bridge-macos-x86_64
+            artifacts/oc-bridge-macos-arm64
+          )
+
+          if gh release view "$release_tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "$release_tag" "${files[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create \
+              "$release_tag" \
+              "${files[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "open-control-bridge $release_tag" \
+              --generate-notes
+          fi

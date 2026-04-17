@@ -1,12 +1,22 @@
 name: Candidate
 
+run-name: Candidate ${{ inputs.source_sha }} / ${{ inputs.request_id || 'manual' }}
+
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Source commit SHA to package"
+        required: true
+        type: string
+      request_id:
+        description: "Optional dispatch correlation id"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
-  group: candidate-${{ github.ref }}
+  group: candidate-${{ inputs.source_sha }}
   cancel-in-progress: true
 
 permissions:
@@ -17,27 +27,43 @@ env:
 
 jobs:
   build:
+    name: candidate (${{ matrix.platform }})
+    runs-on: ${{ matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - platform: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: oc-bridge-linux
-          - os: windows-latest
+            filename: oc-bridge-linux-x86_64
+          - platform: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: oc-bridge-windows.exe
-          - os: macos-15-intel
+            filename: oc-bridge-windows-x86_64.exe
+          - platform: macos-15-intel
             target: x86_64-apple-darwin
-            artifact: oc-bridge-macos-x64
-          - os: macos-latest
+            filename: oc-bridge-macos-x86_64
+          - platform: macos-latest
             target: aarch64-apple-darwin
-            artifact: oc-bridge-macos-arm64
-
-    runs-on: ${{ matrix.os }}
+            filename: oc-bridge-macos-arm64
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout source SHA
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Validate source SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          if [ "$sha" != "${{ inputs.source_sha }}" ]; then
+            echo "Checked out SHA does not match input" >&2
+            echo "input=${{ inputs.source_sha }}" >&2
+            echo "head=$sha" >&2
+            exit 1
+          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -46,107 +72,176 @@ jobs:
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev pkg-config
 
-      - name: Build
+      - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Collect artifact (Unix)
+      - name: Collect candidate binary (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/oc-bridge dist/${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/oc-bridge dist/${{ matrix.filename }}
 
-      - name: Collect artifact (Windows)
+      - name: Collect candidate binary (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/oc-bridge.exe dist/${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/oc-bridge.exe dist/${{ matrix.filename }}
 
-      - name: Upload artifact
+      - name: Upload candidate binary
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          name: ${{ matrix.filename }}
+          path: dist/${{ matrix.filename }}
 
-  publish_candidate:
+  metadata:
+    name: candidate metadata
     needs: build
     runs-on: ubuntu-latest
-
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Download all artifacts
+      - name: Checkout source SHA
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Checkout ms-dev-env
+        uses: actions/checkout@v6
+        with:
+          repository: petitechose-midi-studio/ms-dev-env
+          ref: main
+          path: workspace
+
+      - name: Setup ms runtime
+        uses: ./workspace/.github/actions/setup-ms-runtime
+        with:
+          working-directory: workspace
+
+      - name: Resolve candidate tag
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "candidate_tag=rc-${{ inputs.source_sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download candidate binaries
         uses: actions/download-artifact@v8
         with:
-          path: dist
+          path: artifacts
 
-      - name: Flatten artifacts
+      - name: Flatten candidate binaries
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist_flat
-          find dist -maxdepth 5 -type f -print -exec cp '{}' dist_flat/ \;
-          ls -la dist_flat
+          mkdir -p artifacts_flat
+          find artifacts -maxdepth 5 -type f -print -exec cp '{}' artifacts_flat/ \;
+          ls -la artifacts_flat
 
-      - name: Build candidate metadata
+      - name: Generate candidate metadata inputs
         shell: bash
-        env:
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_SHA: ${{ github.sha }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          sha256sum dist_flat/* > checksums.txt
-          python - <<'PY'
-          import datetime as dt
-          import hashlib
-          import json
-          from pathlib import Path
-
-          dist = Path("dist_flat")
-          files = sorted(p for p in dist.iterdir() if p.is_file())
-          artifacts = []
-          for p in files:
-              data = p.read_bytes()
-              artifacts.append(
-                  {
-                      "filename": p.name,
-                      "size": len(data),
-                      "sha256": hashlib.sha256(data).hexdigest(),
-                  }
-              )
-
-          payload = {
-              "schema": 1,
-              "repo": __import__("os").environ["GITHUB_REPOSITORY"],
-              "sha": __import__("os").environ["GITHUB_SHA"],
-              "workflow": "candidate.yml",
-              "run_id": int(__import__("os").environ["GITHUB_RUN_ID"]),
-              "run_attempt": int(__import__("os").environ["GITHUB_RUN_ATTEMPT"]),
-              "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-              "artifacts": artifacts,
+          cat > artifacts_flat/candidate-artifacts.json <<'EOF'
+          [
+            {
+              "id": "oc-bridge-linux-x86_64",
+              "filename": "oc-bridge-linux-x86_64",
+              "kind": "binary",
+              "os": "linux",
+              "arch": "x86_64"
+            },
+            {
+              "id": "oc-bridge-windows-x86_64",
+              "filename": "oc-bridge-windows-x86_64.exe",
+              "kind": "binary",
+              "os": "windows",
+              "arch": "x86_64"
+            },
+            {
+              "id": "oc-bridge-macos-x86_64",
+              "filename": "oc-bridge-macos-x86_64",
+              "kind": "binary",
+              "os": "macos",
+              "arch": "x86_64"
+            },
+            {
+              "id": "oc-bridge-macos-arm64",
+              "filename": "oc-bridge-macos-arm64",
+              "kind": "binary",
+              "os": "macos",
+              "arch": "arm64"
+            }
+          ]
+          EOF
+          cat > artifacts_flat/input-repos.json <<'EOF'
+          [
+            {
+              "id": "oc-bridge",
+              "repo": "open-control/bridge",
+              "sha": "${{ inputs.source_sha }}"
+            }
+          ]
+          EOF
+          cat > artifacts_flat/toolchain.json <<'EOF'
+          {
+            "rust": "stable"
           }
+          EOF
 
-          Path("candidate.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-          PY
-
-      - name: Publish draft candidate release
+      - name: Write candidate manifest, checksums, and signature
         shell: bash
+        working-directory: workspace
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: rc-${{ github.sha }}
+          MS_CANDIDATE_ED25519_SK: ${{ secrets.MS_CANDIDATE_ED25519_SK }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist_flat/* candidate.json checksums.txt --repo "${GITHUB_REPOSITORY}" --clobber
-          else
-            gh release create "$TAG" dist_flat/* candidate.json checksums.txt \
+          uv run ms release candidate write \
+            --artifacts-dir ../artifacts_flat \
+            --artifacts-json ../artifacts_flat/candidate-artifacts.json \
+            --input-repos-json ../artifacts_flat/input-repos.json \
+            --producer-repo open-control/bridge \
+            --producer-kind oc-bridge-binaries \
+            --workflow-file .github/workflows/candidate.yml \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --manifest-path ../artifacts_flat/candidate.json \
+            --checksums-path ../artifacts_flat/checksums.txt \
+            --sig-path ../artifacts_flat/candidate.json.sig \
+            --recipe-base-dir .. \
+            --recipe-path .github/workflows/candidate.yml \
+            --recipe-path Cargo.toml \
+            --recipe-path Cargo.lock \
+            --toolchain-json ../artifacts_flat/toolchain.json
+
+      - name: Publish signed candidate release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.vars.outputs.candidate_tag }}"
+          if gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload \
+              "$tag" \
+              artifacts_flat/* \
               --repo "${GITHUB_REPOSITORY}" \
-              --title "$TAG" \
-              --notes "Candidate artifacts for ${GITHUB_SHA}" \
-              --draft
+              --clobber
+          else
+            gh release create \
+              "$tag" \
+              artifacts_flat/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "candidate $tag" \
+              --notes "Candidate artifacts for ${{ inputs.source_sha }}" \
+              --draft \
+              --prerelease
           fi
