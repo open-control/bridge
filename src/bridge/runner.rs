@@ -292,7 +292,10 @@ async fn run_with_serial_controller(
             stats.clone(),
             log_tx.clone(),
         )
-        .with_duplicate_guard(config.duplicate_guard_enabled, config.duplicate_guard_window_ms);
+        .with_duplicate_guard(
+            config.duplicate_guard_enabled,
+            config.duplicate_guard_window_ms,
+        );
 
         // Run the session until:
         // - transport disconnect
@@ -379,7 +382,10 @@ async fn run_with_udp_controller(
 
     // Run session with raw codec (UDP uses raw protocol)
     let session = BridgeSession::new(controller, host, RawCodec, stats.clone(), log_tx.clone())
-        .with_duplicate_guard(config.duplicate_guard_enabled, config.duplicate_guard_window_ms);
+        .with_duplicate_guard(
+            config.duplicate_guard_enabled,
+            config.duplicate_guard_window_ms,
+        );
     session.run(shutdown).await?;
 
     logging::try_log(
@@ -425,7 +431,10 @@ async fn run_with_websocket_controller(
 
     // Run session with raw codec (WebSocket uses raw protocol)
     let session = BridgeSession::new(controller, host, RawCodec, stats.clone(), log_tx.clone())
-        .with_duplicate_guard(config.duplicate_guard_enabled, config.duplicate_guard_window_ms);
+        .with_duplicate_guard(
+            config.duplicate_guard_enabled,
+            config.duplicate_guard_window_ms,
+        );
     session.run(shutdown).await?;
 
     logging::try_log(

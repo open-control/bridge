@@ -350,7 +350,8 @@ pub fn config_path() -> Result<PathBuf> {
 }
 
 pub fn normalized_optional_string(value: Option<&str>) -> Option<String> {
-    value.map(str::trim)
+    value
+        .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string())
 }
@@ -802,8 +803,10 @@ host_udp_port = 9500
 
     #[test]
     fn test_effective_instance_id_sanitizes_invalid_chars() {
-        let mut config = BridgeConfig::default();
-        config.instance_id = Some(" bitwig hw/17081760 ".to_string());
+        let config = BridgeConfig {
+            instance_id: Some(" bitwig hw/17081760 ".to_string()),
+            ..BridgeConfig::default()
+        };
         assert_eq!(effective_instance_id(&config), "bitwig_hw_17081760");
     }
 }

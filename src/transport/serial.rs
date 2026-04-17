@@ -302,9 +302,16 @@ mod tests {
             candidate("COM3", Some("17081760")),
             candidate("COM6", Some("17076520")),
         ];
-        let err = select_candidate(&candidates, &device_config(), &SerialMatchRequest::default())
-            .unwrap_err();
-        assert!(matches!(err, BridgeError::MultipleDevicesFound { count: 2 }));
+        let err = select_candidate(
+            &candidates,
+            &device_config(),
+            &SerialMatchRequest::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            BridgeError::MultipleDevicesFound { count: 2 }
+        ));
     }
 
     #[test]
@@ -338,6 +345,9 @@ mod tests {
         let request = SerialMatchRequest {
             serial_number: Some("17081760".to_string()),
         };
-        assert!(!matches_request(&candidate("COM6", Some("17076520")), &request));
+        assert!(!matches_request(
+            &candidate("COM6", Some("17076520")),
+            &request
+        ));
     }
 }
