@@ -137,6 +137,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         shell: bash
