@@ -210,6 +210,22 @@ jobs:
           find artifacts -maxdepth 5 -type f -print -exec cp '{}' artifacts_flat/ \;
           ls -la artifacts_flat
 
+      - name: Archive bridge config
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          root = Path("config")
+          out_path = Path("artifacts_flat/oc-bridge-config.zip")
+          with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              for path in sorted(root.rglob("*")):
+                  if path.is_file():
+                      zf.write(path, path.relative_to(root).as_posix())
+          PY
+
       - name: Generate candidate metadata inputs
         shell: bash
         run: |
@@ -243,6 +259,11 @@ jobs:
               "kind": "binary",
               "os": "macos",
               "arch": "arm64"
+            },
+            {
+              "id": "oc-bridge-config",
+              "filename": "oc-bridge-config.zip",
+              "kind": "config"
             }
           ]
           EOF
@@ -289,6 +310,8 @@ jobs:
             --recipe-path .github/workflows/candidate.yml \
             --recipe-path Cargo.toml \
             --recipe-path Cargo.lock \
+            --recipe-path config/default.toml \
+            --recipe-path config/devices/teensy.toml \
             --toolchain-json ../artifacts_flat/toolchain.json
 
       - name: Publish signed candidate release
