@@ -58,4 +58,5 @@ jobs:
         run: cargo test
 
       - name: Build (release)
+        if: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
         run: cargo build --release
