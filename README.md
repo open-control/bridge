@@ -34,6 +34,16 @@ Prebuilt binaries available in [Releases](https://github.com/open-control/bridge
 - `oc-bridge-windows.exe`
 - `oc-bridge-linux`
 
+## Release Policy
+
+- `oc-bridge` is a standalone Open Control product and may be released publicly from this repo.
+- Repo-local final releases are publish-only promotions of exact signed candidates. They must not
+  rebuild source code during promotion.
+- MIDI Studio distribution continues to consume the exact signed `oc-bridge` candidate artifacts,
+  not the repo-local final release tag.
+- For end-user MIDI Studio installs, `ms-manager` supervises `oc-bridge`, but `distribution`
+  remains the canonical system release surface.
+
 ### Run
 
 ```bash
