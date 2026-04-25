@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,6 +32,9 @@ jobs:
   promote:
     name: promote release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -52,6 +55,21 @@ jobs:
             echo "Invalid tooling_sha: $tooling_sha" >&2
             exit 1
           fi
+          validate_sha() {
+            local repo="$1"
+            local sha="$2"
+            local repo_dir
+            repo_dir="$(mktemp -d)"
+            git -C "$repo_dir" init -q
+            git -C "$repo_dir" remote add origin "https://github.com/${repo}.git"
+            git -C "$repo_dir" fetch --no-tags --filter=blob:none origin "+refs/heads/main:refs/remotes/origin/main"
+            if ! git -C "$repo_dir" merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
+              echo "$repo SHA is not reachable from main: $sha" >&2
+              exit 1
+            fi
+          }
+          validate_sha open-control/bridge "$source_sha"
+          validate_sha petitechose-midi-studio/ms-dev-env "$tooling_sha"
 
           candidate_tag="rc-${source_sha}-tooling-${tooling_sha}"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
@@ -64,6 +82,7 @@ jobs:
         with:
           ref: ${{ steps.vars.outputs.source_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Validate source SHA
         shell: bash
@@ -121,6 +140,7 @@ jobs:
           repository: petitechose-midi-studio/ms-dev-env
           ref: ${{ steps.vars.outputs.tooling_sha }}
           path: workspace
+          persist-credentials: false
 
       - name: Setup ms runtime
         uses: ./workspace/.github/actions/setup-ms-runtime
@@ -176,12 +196,12 @@ jobs:
           )
 
           if gh release view "$release_tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "$release_tag" "${files[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
-          else
-            gh release create \
-              "$release_tag" \
-              "${files[@]}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "open-control-bridge $release_tag" \
-              --generate-notes
+            echo "release already exists: $release_tag" >&2
+            exit 1
           fi
+          gh release create \
+            "$release_tag" \
+            "${files[@]}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "open-control-bridge $release_tag" \
+            --generate-notes
