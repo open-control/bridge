@@ -10,6 +10,7 @@
 //! - Transport lifecycle (that's the caller's responsibility)
 //! - Reconnection logic (handled by the bridge main loop)
 
+use super::controller_rpc::{ControllerRpcError, ControllerRpcRequest};
 use super::guard::{GuardAction, RelayGuard};
 use super::protocol::parse_message_name;
 use super::stats::Stats;
@@ -18,10 +19,11 @@ use crate::error::Result;
 use crate::logging::{self, LogEntry};
 use crate::transport::TransportChannels;
 use bytes::Bytes;
+use std::future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Bridge session between controller and host transports
 ///
@@ -64,6 +66,15 @@ pub struct BridgeSession<C: Codec> {
     guard: RelayGuard,
     /// Monotonic time reference for guard intervals
     start_time: Instant,
+    /// Optional local management requests to send through the controller link.
+    controller_rpc_rx: Option<mpsc::Receiver<ControllerRpcRequest>>,
+    pending_controller_rpc: Option<PendingControllerRpc>,
+}
+
+struct PendingControllerRpc {
+    expected_response_id: Option<u8>,
+    deadline: Instant,
+    response_tx: oneshot::Sender<std::result::Result<Bytes, ControllerRpcError>>,
 }
 
 impl<C: Codec> BridgeSession<C> {
@@ -83,11 +94,21 @@ impl<C: Codec> BridgeSession<C> {
             log_tx,
             guard: RelayGuard::default(),
             start_time: Instant::now(),
+            controller_rpc_rx: None,
+            pending_controller_rpc: None,
         }
     }
 
     pub fn with_duplicate_guard(mut self, enabled: bool, duplicate_window_ms: u64) -> Self {
         self.guard = RelayGuard::new(enabled, duplicate_window_ms);
+        self
+    }
+
+    pub fn with_controller_rpc(
+        mut self,
+        controller_rpc_rx: mpsc::Receiver<ControllerRpcRequest>,
+    ) -> Self {
+        self.controller_rpc_rx = Some(controller_rpc_rx);
         self
     }
 
@@ -106,6 +127,7 @@ impl<C: Codec> BridgeSession<C> {
                     if shutdown.load(Ordering::Relaxed) {
                         break;
                     }
+                    self.expire_pending_controller_rpc();
                 }
 
                 // Controller -> Host (e.g., Serial -> Bitwig)
@@ -116,6 +138,13 @@ impl<C: Codec> BridgeSession<C> {
                             // Channel closed = controller transport disconnected
                             break;
                         }
+                    }
+                }
+
+                request = recv_optional(&mut self.controller_rpc_rx) => {
+                    match request {
+                        Some(request) => self.handle_controller_rpc_request(request),
+                        None => self.controller_rpc_rx = None,
                     }
                 }
 
@@ -132,6 +161,7 @@ impl<C: Codec> BridgeSession<C> {
             }
         }
 
+        self.fail_pending_controller_rpc(ControllerRpcError::Disconnected);
         Ok(())
     }
 
@@ -141,8 +171,11 @@ impl<C: Codec> BridgeSession<C> {
     fn relay_controller_to_host(&mut self, data: Bytes) {
         let now_ms = self.elapsed_ms();
 
-        // Decode data from controller (may produce multiple frames)
-        self.controller_codec.decode(&data, |frame| {
+        let mut frames = Vec::new();
+        self.controller_codec
+            .decode(&data, |frame| frames.push(frame));
+
+        for frame in frames {
             match frame {
                 Frame::Message { name, payload } => {
                     // Update stats (bytes received from controller)
@@ -151,6 +184,10 @@ impl<C: Codec> BridgeSession<C> {
                     // Log protocol message (silently drop if channel full)
                     if let Some(ref tx) = self.log_tx {
                         let _ = tx.try_send(LogEntry::protocol_in(&name, payload.len()));
+                    }
+
+                    if self.complete_pending_controller_rpc(&payload) {
+                        continue;
                     }
 
                     match self.guard.on_controller_message(payload, now_ms) {
@@ -169,7 +206,7 @@ impl<C: Codec> BridgeSession<C> {
                     }
                 }
             }
-        });
+        }
     }
 
     /// Relay data from host to controller
@@ -192,24 +229,91 @@ impl<C: Codec> BridgeSession<C> {
         );
 
         match self.guard.on_host_message(data, now_ms) {
-            GuardAction::Forward(payload) => self.send_to_controller(payload),
+            GuardAction::Forward(payload) => {
+                let _ = self.send_to_controller(payload);
+            }
             GuardAction::DropDuplicate => {
                 self.stats.add_h2c_duplicate_drop();
             }
         }
     }
 
-    fn send_to_controller(&mut self, data: Bytes) {
+    fn handle_controller_rpc_request(&mut self, request: ControllerRpcRequest) {
+        if self.pending_controller_rpc.is_some() {
+            let _ = request.response_tx.send(Err(ControllerRpcError::Busy));
+            return;
+        }
+
+        self.stats.add_tx(request.payload.len());
+        logging::try_log(
+            &self.log_tx,
+            LogEntry::protocol_out("controller-rpc", request.payload.len()),
+            "controller_rpc_out",
+        );
+
+        let pending = PendingControllerRpc {
+            expected_response_id: request.expected_response_id,
+            deadline: Instant::now() + request.timeout,
+            response_tx: request.response_tx,
+        };
+        self.pending_controller_rpc = Some(pending);
+
+        if !self.send_to_controller(request.payload) {
+            self.fail_pending_controller_rpc(ControllerRpcError::SendFailed);
+        }
+    }
+
+    fn complete_pending_controller_rpc(&mut self, payload: &Bytes) -> bool {
+        let Some(pending) = self.pending_controller_rpc.as_ref() else {
+            return false;
+        };
+
+        if let Some(expected) = pending.expected_response_id {
+            if payload.first().copied() != Some(expected) {
+                return false;
+            }
+        }
+
+        let Some(pending) = self.pending_controller_rpc.take() else {
+            return false;
+        };
+        let _ = pending.response_tx.send(Ok(payload.clone()));
+        true
+    }
+
+    fn expire_pending_controller_rpc(&mut self) {
+        let Some(pending) = self.pending_controller_rpc.as_ref() else {
+            return;
+        };
+        if Instant::now() < pending.deadline {
+            return;
+        }
+        self.fail_pending_controller_rpc(ControllerRpcError::Timeout);
+    }
+
+    fn fail_pending_controller_rpc(&mut self, err: ControllerRpcError) {
+        if let Some(pending) = self.pending_controller_rpc.take() {
+            let _ = pending.response_tx.send(Err(err));
+        }
+    }
+
+    fn send_to_controller(&mut self, data: Bytes) -> bool {
         // Encode for controller transport (e.g., COBS for Serial)
         let mut encoded = Vec::with_capacity(data.len() + 16);
         self.controller_codec.encode(&data, &mut encoded);
 
-        // Send to controller (silently drop if channel full)
-        let _ = self.controller.tx.try_send(Bytes::from(encoded));
+        self.controller.tx.try_send(Bytes::from(encoded)).is_ok()
     }
 
     fn elapsed_ms(&self) -> u64 {
         self.start_time.elapsed().as_millis() as u64
+    }
+}
+
+async fn recv_optional<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => future::pending().await,
     }
 }
 
@@ -218,6 +322,7 @@ mod tests {
     use super::*;
     use crate::codec::RawCodec;
     use std::time::Duration;
+    use tokio::sync::oneshot;
 
     #[tokio::test]
     async fn test_session_shutdown() {
@@ -448,5 +553,112 @@ mod tests {
 
         // Cleanup
         drop(ctrl_in_tx);
+    }
+
+    #[tokio::test]
+    async fn test_controller_rpc_captures_expected_response() {
+        let (ctrl_in_tx, ctrl_in_rx) = mpsc::channel(16);
+        let (ctrl_out_tx, mut ctrl_out_rx) = mpsc::channel(16);
+        let (_host_in_tx, host_in_rx) = mpsc::channel(16);
+        let (host_out_tx, mut host_out_rx) = mpsc::channel(16);
+        let (rpc_tx, rpc_rx) = mpsc::channel(16);
+
+        let controller = TransportChannels {
+            rx: ctrl_in_rx,
+            tx: ctrl_out_tx,
+        };
+        let host = TransportChannels {
+            rx: host_in_rx,
+            tx: host_out_tx,
+        };
+
+        let stats = Arc::new(Stats::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let session =
+            BridgeSession::new(controller, host, RawCodec, stats, None).with_controller_rpc(rpc_rx);
+        let shutdown_clone = shutdown.clone();
+        let handle = tokio::spawn(async move { session.run(shutdown_clone).await });
+
+        let (response_tx, response_rx) = oneshot::channel();
+        rpc_tx
+            .send(ControllerRpcRequest {
+                payload: Bytes::from_static(&[0xE0, 0x01]),
+                expected_response_id: Some(0xE1),
+                timeout: Duration::from_secs(1),
+                response_tx,
+            })
+            .await
+            .unwrap();
+
+        let request = ctrl_out_rx.recv().await.unwrap();
+        assert_eq!(request.as_ref(), &[0xE0, 0x01]);
+
+        ctrl_in_tx
+            .send(Bytes::from_static(&[0xE1, 0x00, 0x2A]))
+            .await
+            .unwrap();
+
+        let response = response_rx.await.unwrap().unwrap();
+        assert_eq!(response.as_ref(), &[0xE1, 0x00, 0x2A]);
+        assert!(host_out_rx.try_recv().is_err());
+
+        shutdown.store(true, Ordering::SeqCst);
+        drop(ctrl_in_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_controller_rpc_leaves_unmatched_controller_messages_on_host_path() {
+        let (ctrl_in_tx, ctrl_in_rx) = mpsc::channel(16);
+        let (ctrl_out_tx, mut ctrl_out_rx) = mpsc::channel(16);
+        let (_host_in_tx, host_in_rx) = mpsc::channel(16);
+        let (host_out_tx, mut host_out_rx) = mpsc::channel(16);
+        let (rpc_tx, rpc_rx) = mpsc::channel(16);
+
+        let controller = TransportChannels {
+            rx: ctrl_in_rx,
+            tx: ctrl_out_tx,
+        };
+        let host = TransportChannels {
+            rx: host_in_rx,
+            tx: host_out_tx,
+        };
+
+        let stats = Arc::new(Stats::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let session =
+            BridgeSession::new(controller, host, RawCodec, stats, None).with_controller_rpc(rpc_rx);
+        let shutdown_clone = shutdown.clone();
+        let handle = tokio::spawn(async move { session.run(shutdown_clone).await });
+
+        let (response_tx, response_rx) = oneshot::channel();
+        rpc_tx
+            .send(ControllerRpcRequest {
+                payload: Bytes::from_static(&[0xE0, 0x01]),
+                expected_response_id: Some(0xE1),
+                timeout: Duration::from_secs(1),
+                response_tx,
+            })
+            .await
+            .unwrap();
+        let _ = ctrl_out_rx.recv().await.unwrap();
+
+        ctrl_in_tx
+            .send(Bytes::from_static(&[0x10, 0x00]))
+            .await
+            .unwrap();
+        let forwarded = host_out_rx.recv().await.unwrap();
+        assert_eq!(forwarded.as_ref(), &[0x10, 0x00]);
+
+        ctrl_in_tx
+            .send(Bytes::from_static(&[0xE1, 0x00]))
+            .await
+            .unwrap();
+        let response = response_rx.await.unwrap().unwrap();
+        assert_eq!(response.as_ref(), &[0xE1, 0x00]);
+
+        shutdown.store(true, Ordering::SeqCst);
+        drop(ctrl_in_tx);
+        let _ = handle.await;
     }
 }

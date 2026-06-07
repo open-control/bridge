@@ -8,7 +8,11 @@
 //! - One JSON request per connection
 //! - Small command set: pause/resume/status
 
+use crate::bridge::controller_rpc::{
+    ControllerRpcError, ControllerRpcRequest, ControllerRpcResult,
+};
 use crate::error::{BridgeError, Result};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 
 pub const CONTROL_SCHEMA: u32 = 1;
 
@@ -37,6 +41,7 @@ pub struct ControlState {
     desired_tx: watch::Sender<SerialRunState>,
     serial_open_rx: watch::Receiver<bool>,
     resolved_serial_port_rx: watch::Receiver<Option<String>>,
+    controller_rpc_rx: watch::Receiver<Option<mpsc::Sender<ControllerRpcRequest>>>,
     shutdown: Arc<AtomicBool>,
     info: ControlInfo,
 }
@@ -45,6 +50,7 @@ pub struct ControlRuntime {
     pub desired_rx: watch::Receiver<SerialRunState>,
     pub serial_open_tx: watch::Sender<bool>,
     pub resolved_serial_port_tx: watch::Sender<Option<String>>,
+    pub controller_rpc_tx: watch::Sender<Option<mpsc::Sender<ControllerRpcRequest>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,11 +71,13 @@ impl ControlState {
         let (desired_tx, desired_rx) = watch::channel(SerialRunState::Running);
         let (serial_open_tx, serial_open_rx) = watch::channel(false);
         let (resolved_serial_port_tx, resolved_serial_port_rx) = watch::channel(None);
+        let (controller_rpc_tx, controller_rpc_rx) = watch::channel(None);
         (
             Self {
                 desired_tx,
                 serial_open_rx,
                 resolved_serial_port_rx,
+                controller_rpc_rx,
                 shutdown,
                 info,
             },
@@ -77,6 +85,7 @@ impl ControlState {
                 desired_rx,
                 serial_open_tx,
                 resolved_serial_port_tx,
+                controller_rpc_tx,
             },
         )
     }
@@ -97,6 +106,10 @@ impl ControlState {
         self.resolved_serial_port_rx.borrow().clone()
     }
 
+    pub fn controller_rpc_tx(&self) -> Option<mpsc::Sender<ControllerRpcRequest>> {
+        self.controller_rpc_rx.borrow().clone()
+    }
+
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
     }
@@ -111,6 +124,12 @@ struct Request {
     #[serde(default)]
     schema: Option<u32>,
     cmd: String,
+    #[serde(default)]
+    payload_hex: Option<String>,
+    #[serde(default)]
+    expected_response_id: Option<u8>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -140,6 +159,8 @@ pub struct Response {
     pub log_broadcast_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub control_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_hex: Option<String>,
 }
 
 pub async fn bind_listener(port: u16) -> Result<TcpListener> {
@@ -196,6 +217,7 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
 
     let cmd = req.cmd.to_ascii_lowercase();
     let mut message: Option<String> = None;
+    let mut payload_hex: Option<String> = None;
     let mut ok = true;
 
     // For pause, we want to return only when the serial port is actually released.
@@ -237,6 +259,15 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
             }
         }
         "status" | "ping" | "info" => {}
+        "controller-rpc" | "controller_rpc" | "rpc" => match controller_rpc(&req, &state).await {
+            Ok(payload) => {
+                payload_hex = Some(hex_encode(&payload));
+            }
+            Err(err) => {
+                ok = false;
+                message = Some(err);
+            }
+        },
         "shutdown" => state.request_shutdown(),
         other => {
             ok = false;
@@ -244,11 +275,11 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
         }
     }
 
-    let out = serde_json::to_vec(&build_response(&cmd, &state, ok, message)).map_err(|e| {
-        BridgeError::ControlProtocol {
+    let out = serde_json::to_vec(&build_response(&cmd, &state, ok, message, payload_hex)).map_err(
+        |e| BridgeError::ControlProtocol {
             message: e.to_string(),
-        }
-    })?;
+        },
+    )?;
 
     let _ = stream.write_all(&out).await;
     let _ = stream.write_all(b"\n").await;
@@ -256,7 +287,13 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
     Ok(())
 }
 
-fn build_response(cmd: &str, state: &ControlState, ok: bool, message: Option<String>) -> Response {
+fn build_response(
+    cmd: &str,
+    state: &ControlState,
+    ok: bool,
+    message: Option<String>,
+    payload_hex: Option<String>,
+) -> Response {
     let paused = state.desired().is_paused();
     let serial_open = state.serial_open();
 
@@ -275,6 +312,7 @@ fn build_response(cmd: &str, state: &ControlState, ok: bool, message: Option<Str
         host_udp_port: None,
         log_broadcast_port: None,
         control_port: None,
+        payload_hex,
     };
 
     if cmd == "status" || cmd == "info" {
@@ -290,6 +328,104 @@ fn build_response(cmd: &str, state: &ControlState, ok: bool, message: Option<Str
         resp.control_port = Some(info.control_port);
     }
     resp
+}
+
+async fn controller_rpc(req: &Request, state: &ControlState) -> std::result::Result<Bytes, String> {
+    if !state.info.serial_supported {
+        return Err(
+            "controller rpc not supported (controller transport is not Serial)".to_string(),
+        );
+    }
+    if !state.serial_open() {
+        return Err("controller rpc unavailable (serial is not open)".to_string());
+    }
+
+    let payload_hex = req
+        .payload_hex
+        .as_deref()
+        .ok_or_else(|| "controller rpc missing payload_hex".to_string())?;
+    let payload = hex_decode(payload_hex)?;
+    if payload.is_empty() {
+        return Err("controller rpc payload is empty".to_string());
+    }
+
+    let timeout = bounded_rpc_timeout(req.timeout_ms);
+    let Some(tx) = state.controller_rpc_tx() else {
+        return Err("controller rpc unavailable (no active session)".to_string());
+    };
+
+    let (response_tx, response_rx) = oneshot::channel::<ControllerRpcResult>();
+    let request = ControllerRpcRequest {
+        payload: Bytes::from(payload),
+        expected_response_id: req.expected_response_id,
+        timeout,
+        response_tx,
+    };
+
+    tx.try_send(request)
+        .map_err(|_| "controller rpc unavailable (session queue full or closed)".to_string())?;
+
+    match tokio::time::timeout(timeout + Duration::from_millis(50), response_rx).await {
+        Ok(Ok(Ok(payload))) => Ok(payload),
+        Ok(Ok(Err(err))) => Err(controller_rpc_error_message(err)),
+        Ok(Err(_)) => Err("controller rpc disconnected".to_string()),
+        Err(_) => Err("controller rpc timeout".to_string()),
+    }
+}
+
+fn bounded_rpc_timeout(timeout_ms: Option<u64>) -> Duration {
+    const DEFAULT_MS: u64 = 1_000;
+    const MIN_MS: u64 = 50;
+    const MAX_MS: u64 = 5_000;
+
+    let ms = timeout_ms.unwrap_or(DEFAULT_MS).clamp(MIN_MS, MAX_MS);
+    Duration::from_millis(ms)
+}
+
+fn controller_rpc_error_message(err: ControllerRpcError) -> String {
+    match err {
+        ControllerRpcError::Busy => "controller rpc busy".to_string(),
+        ControllerRpcError::Disconnected => "controller rpc disconnected".to_string(),
+        ControllerRpcError::Timeout => "controller rpc timeout".to_string(),
+        ControllerRpcError::SendFailed => "controller rpc send failed".to_string(),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn hex_decode(text: &str) -> std::result::Result<Vec<u8>, String> {
+    let text = text.trim();
+    if !text.len().is_multiple_of(2) {
+        return Err("payload_hex must contain an even number of hex digits".to_string());
+    }
+
+    let mut out = Vec::with_capacity(text.len() / 2);
+    let bytes = text.as_bytes();
+    for idx in (0..bytes.len()).step_by(2) {
+        let hi = hex_nibble(bytes[idx])
+            .ok_or_else(|| format!("payload_hex contains non-hex digit at byte {}", idx))?;
+        let lo = hex_nibble(bytes[idx + 1])
+            .ok_or_else(|| format!("payload_hex contains non-hex digit at byte {}", idx + 1))?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub fn send_command_blocking(
@@ -310,6 +446,9 @@ pub fn send_command_blocking(
     let req = serde_json::to_string(&Request {
         schema: Some(CONTROL_SCHEMA),
         cmd: cmd.to_string(),
+        payload_hex: None,
+        expected_response_id: None,
+        timeout_ms: None,
     })
     .map_err(|e| BridgeError::ControlProtocol {
         message: e.to_string(),
@@ -362,9 +501,22 @@ mod tests {
             .resolved_serial_port_tx
             .send_replace(Some("COM3".to_string()));
 
-        let response = build_response("info", &state, true, None);
+        let response = build_response("info", &state, true, None, None);
         assert_eq!(response.instance_id, Some("bitwig-hw-17081760".to_string()));
         assert_eq!(response.controller_serial, Some("17081760".to_string()));
         assert_eq!(response.resolved_serial_port, Some("COM3".to_string()));
+    }
+
+    #[test]
+    fn test_hex_roundtrip() {
+        let bytes = b"\x00\x01\x0f\x10\xab\xff";
+        assert_eq!(hex_encode(bytes), "00010f10abff");
+        assert_eq!(hex_decode("00010F10ABff").unwrap(), bytes);
+    }
+
+    #[test]
+    fn test_hex_decode_rejects_invalid_input() {
+        assert!(hex_decode("abc").is_err());
+        assert!(hex_decode("zz").is_err());
     }
 }
