@@ -10,7 +10,7 @@ use crate::config::{BridgeConfig, ControllerTransport, HostTransport};
 use crate::constants::{
     CHANNEL_CAPACITY, POST_DISCONNECT_DELAY_SECS, RECONNECT_DELAY_SECS, UDP_BUFFER_SIZE,
 };
-use crate::control::{ControlRuntime, ControlState, SerialRunState};
+use crate::control::{ControlRuntime, ControlState};
 use crate::error::Result;
 use crate::logging::{self, LogEntry};
 use crate::transport::{
@@ -23,7 +23,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tokio::sync::watch;
 
 // =============================================================================
 // Main entry point
@@ -42,14 +41,7 @@ pub(super) async fn run(
     // Control plane (local IPC): always available in daemon mode when control_port != 0.
     // Serial pause/resume is only supported when controller transport is Serial.
     let serial_supported = matches!(config.controller_transport, ControllerTransport::Serial);
-    let (
-        control_state,
-        ControlRuntime {
-            desired_rx,
-            serial_open_tx,
-            resolved_serial_port_tx,
-        },
-    ) = ControlState::new(
+    let (control_state, control_runtime) = ControlState::new(
         shutdown.clone(),
         crate::control::ControlInfo {
             pid: std::process::id(),
@@ -100,29 +92,16 @@ pub(super) async fn run(
     match config.controller_transport {
         ControllerTransport::Serial => {
             let _keepalive = control_keepalive;
-            run_with_serial_controller(
-                config,
-                shutdown,
-                stats,
-                log_tx,
-                desired_rx,
-                serial_open_tx,
-                resolved_serial_port_tx,
-            )
-            .await
+            run_with_serial_controller(config, shutdown, stats, log_tx, control_runtime).await
         }
         ControllerTransport::Udp => {
             drop(control_keepalive);
-            drop(desired_rx);
-            drop(serial_open_tx);
-            drop(resolved_serial_port_tx);
+            drop(control_runtime);
             run_with_udp_controller(config, shutdown, stats, log_tx).await
         }
         ControllerTransport::WebSocket => {
             drop(control_keepalive);
-            drop(desired_rx);
-            drop(serial_open_tx);
-            drop(resolved_serial_port_tx);
+            drop(control_runtime);
             run_with_websocket_controller(config, shutdown, stats, log_tx).await
         }
     }
@@ -141,10 +120,13 @@ async fn run_with_serial_controller(
     shutdown: Arc<AtomicBool>,
     stats: Arc<Stats>,
     log_tx: Option<mpsc::Sender<LogEntry>>,
-    mut pause_rx: watch::Receiver<SerialRunState>,
-    serial_open_tx: watch::Sender<bool>,
-    resolved_serial_port_tx: watch::Sender<Option<String>>,
+    control: ControlRuntime,
 ) -> Result<()> {
+    let mut pause_rx = control.desired_rx;
+    let serial_open_tx = control.serial_open_tx;
+    let resolved_serial_port_tx = control.resolved_serial_port_tx;
+    let controller_rpc_tx = control.controller_rpc_tx;
+
     // Load device preset if configured
     let device_config = config
         .device_preset
@@ -153,6 +135,7 @@ async fn run_with_serial_controller(
 
     let _ = serial_open_tx.send_replace(false);
     let _ = resolved_serial_port_tx.send_replace(None);
+    let _ = controller_rpc_tx.send_replace(None);
 
     // Create host transport once and keep it alive across serial reconnects/pause.
     let host_transport = create_host_transport(config, shutdown.clone(), &log_tx).await?;
@@ -248,6 +231,8 @@ async fn run_with_serial_controller(
 
         let _ = serial_open_tx.send_replace(true);
         let _ = resolved_serial_port_tx.send_replace(Some(port_name.clone()));
+        let (session_rpc_tx, session_rpc_rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let _ = controller_rpc_tx.send_replace(Some(session_rpc_tx));
 
         // Create per-session host receiver (subscribe to persistent host transport).
         let mut host_sub = host_bcast_tx.subscribe();
@@ -292,6 +277,7 @@ async fn run_with_serial_controller(
             stats.clone(),
             log_tx.clone(),
         )
+        .with_controller_rpc(session_rpc_rx)
         .with_duplicate_guard(
             config.duplicate_guard_enabled,
             config.duplicate_guard_window_ms,
@@ -326,6 +312,7 @@ async fn run_with_serial_controller(
         // Session dropped: serial port should be released.
         let _ = serial_open_tx.send_replace(false);
         let _ = resolved_serial_port_tx.send_replace(None);
+        let _ = controller_rpc_tx.send_replace(None);
 
         // Check if this was a clean shutdown
         if shutdown.load(Ordering::Relaxed) {
