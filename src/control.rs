@@ -5,24 +5,28 @@
 //!
 //! This is intentionally minimal:
 //! - TCP on 127.0.0.1 only
-//! - One JSON request per connection
+//! - JSON lines for human-facing commands
+//! - Binary frames for high-throughput controller RPC
 //! - Small command set: pause/resume/status
 
 use crate::bridge::controller_rpc::{
-    ControllerRpcError, ControllerRpcRequest, ControllerRpcResult,
+    protocol_frame_request_id, ControllerRpcError, ControllerRpcRequest, ControllerRpcResult,
 };
+use crate::control_binary;
 use crate::error::{BridgeError, Result};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub const CONTROL_SCHEMA: u32 = 1;
+const MAX_CONTROL_REQUEST_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SerialRunState {
@@ -124,12 +128,6 @@ struct Request {
     #[serde(default)]
     schema: Option<u32>,
     cmd: String,
-    #[serde(default)]
-    payload_hex: Option<String>,
-    #[serde(default)]
-    expected_response_id: Option<u8>,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -159,8 +157,6 @@ pub struct Response {
     pub log_broadcast_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub control_port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload_hex: Option<String>,
 }
 
 pub async fn bind_listener(port: u16) -> Result<TcpListener> {
@@ -193,18 +189,48 @@ pub async fn run_server_with_listener(
 }
 
 async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result<()> {
-    // Read up to 4KB (one request)
-    let mut buf = vec![0u8; 4096];
-    let n = stream
-        .read(&mut buf)
+    let mut first = [0u8; 1];
+    let read = stream
+        .read(&mut first)
         .await
         .map_err(|e| BridgeError::ControlProtocol {
             message: e.to_string(),
         })?;
-    buf.truncate(n);
+    if read == 0 {
+        return Ok(());
+    }
 
-    let text = String::from_utf8_lossy(&buf);
-    let text = text.trim();
+    if first[0] == control_binary::REQUEST_MAGIC[0] {
+        return handle_binary_connection(first[0], stream, state).await;
+    }
+
+    handle_json_connection(first[0], stream, state).await
+}
+
+async fn handle_json_connection(first: u8, stream: TcpStream, state: ControlState) -> Result<()> {
+    // JSON control requests are for small human-facing daemon commands only.
+    let mut reader = BufReader::new(stream);
+    let mut line = String::with_capacity(16 * 1024);
+    line.push(first as char);
+    if !line.ends_with('\n') {
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| BridgeError::ControlProtocol {
+                message: e.to_string(),
+            })?;
+        if n == 0 && line.is_empty() {
+            return Ok(());
+        }
+    }
+
+    if line.len() > MAX_CONTROL_REQUEST_BYTES {
+        return Err(BridgeError::ControlProtocol {
+            message: "control request too large".to_string(),
+        });
+    }
+
+    let text = line.trim();
     if text.is_empty() {
         return Err(BridgeError::ControlProtocol {
             message: "empty request".to_string(),
@@ -215,9 +241,24 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
         message: format!("invalid json: {e}"),
     })?;
 
+    let response = process_request(&req, &state).await?;
+    let out = serde_json::to_vec(&response).map_err(|e| BridgeError::ControlProtocol {
+        message: e.to_string(),
+    })?;
+
+    let stream = reader.get_mut();
+    let _ = stream.write_all(&out).await;
+    let _ = stream.write_all(b"\n").await;
+    let _ = stream.flush().await;
+
+    let mut stream = reader.into_inner();
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
+async fn process_request(req: &Request, state: &ControlState) -> Result<Response> {
     let cmd = req.cmd.to_ascii_lowercase();
     let mut message: Option<String> = None;
-    let mut payload_hex: Option<String> = None;
     let mut ok = true;
 
     // For pause, we want to return only when the serial port is actually released.
@@ -259,15 +300,6 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
             }
         }
         "status" | "ping" | "info" => {}
-        "controller-rpc" | "controller_rpc" | "rpc" => match controller_rpc(&req, &state).await {
-            Ok(payload) => {
-                payload_hex = Some(hex_encode(&payload));
-            }
-            Err(err) => {
-                ok = false;
-                message = Some(err);
-            }
-        },
         "shutdown" => state.request_shutdown(),
         other => {
             ok = false;
@@ -275,25 +307,135 @@ async fn handle_connection(mut stream: TcpStream, state: ControlState) -> Result
         }
     }
 
-    let out = serde_json::to_vec(&build_response(&cmd, &state, ok, message, payload_hex)).map_err(
-        |e| BridgeError::ControlProtocol {
-            message: e.to_string(),
-        },
-    )?;
+    Ok(build_response(&cmd, state, ok, message))
+}
 
-    let _ = stream.write_all(&out).await;
-    let _ = stream.write_all(b"\n").await;
-    let _ = stream.shutdown().await;
+async fn handle_binary_connection(first: u8, stream: TcpStream, state: ControlState) -> Result<()> {
+    let (mut reader, mut writer) = stream.into_split();
+    let (response_tx, mut response_rx) = mpsc::channel::<Vec<u8>>(32);
+    let writer_task = tokio::spawn(async move {
+        while let Some(response) = response_rx.recv().await {
+            if writer.write_all(&response).await.is_err() {
+                break;
+            }
+            if writer.flush().await.is_err() {
+                break;
+            }
+        }
+        let _ = writer.shutdown().await;
+    });
+
+    let mut header = [0u8; control_binary::HEADER_BYTES];
+    header[0] = first;
+
+    loop {
+        read_binary_header_tail(&mut reader, &mut header).await?;
+        let request = match control_binary::RequestHeader::decode(&header) {
+            Ok(value) => value,
+            Err(message) => {
+                let response =
+                    build_binary_response(0, control_binary::Status::ProtocolError, &[], &message);
+                let _ = response_tx.send(response).await;
+                break;
+            }
+        };
+
+        if request.payload_len > MAX_CONTROL_REQUEST_BYTES {
+            let response = build_binary_response(
+                request.token,
+                control_binary::Status::ProtocolError,
+                &[],
+                "control request too large",
+            );
+            let _ = response_tx.send(response).await;
+            break;
+        }
+
+        let mut payload = vec![0u8; request.payload_len];
+        reader
+            .read_exact(&mut payload)
+            .await
+            .map_err(|e| BridgeError::ControlProtocol {
+                message: e.to_string(),
+            })?;
+
+        let tx = response_tx.clone();
+        match enqueue_controller_rpc_payload(
+            Bytes::from(payload),
+            request.expected_response_id,
+            request.timeout_ms,
+            &state,
+        ) {
+            Ok((response_rx, timeout)) => {
+                tokio::spawn(async move {
+                    let response = match await_controller_rpc_response(response_rx, timeout).await {
+                        Ok(payload) => build_binary_response(
+                            request.token,
+                            control_binary::Status::Ok,
+                            &payload,
+                            "",
+                        ),
+                        Err((status, message)) => {
+                            build_binary_response(request.token, status, &[], &message)
+                        }
+                    };
+                    let _ = tx.send(response).await;
+                });
+            }
+            Err((status, message)) => {
+                let response = build_binary_response(request.token, status, &[], &message);
+                let _ = response_tx.send(response).await;
+            }
+        }
+
+        match reader.read_exact(&mut header[0..1]).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
+            Err(err) => {
+                return Err(BridgeError::ControlProtocol {
+                    message: err.to_string(),
+                });
+            }
+        }
+    }
+
+    drop(response_tx);
+    let _ = writer_task.await;
     Ok(())
 }
 
-fn build_response(
-    cmd: &str,
-    state: &ControlState,
-    ok: bool,
-    message: Option<String>,
-    payload_hex: Option<String>,
-) -> Response {
+async fn read_binary_header_tail<R>(
+    stream: &mut R,
+    header: &mut [u8; control_binary::HEADER_BYTES],
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    stream
+        .read_exact(&mut header[1..])
+        .await
+        .map_err(|e| BridgeError::ControlProtocol {
+            message: e.to_string(),
+        })?;
+    Ok(())
+}
+
+fn build_binary_response(
+    token: u16,
+    status: control_binary::Status,
+    payload: &[u8],
+    message: &str,
+) -> Vec<u8> {
+    control_binary::ResponseFrame {
+        token,
+        status,
+        payload,
+        message,
+    }
+    .encode()
+}
+
+fn build_response(cmd: &str, state: &ControlState, ok: bool, message: Option<String>) -> Response {
     let paused = state.desired().is_paused();
     let serial_open = state.serial_open();
 
@@ -312,7 +454,6 @@ fn build_response(
         host_udp_port: None,
         log_broadcast_port: None,
         control_port: None,
-        payload_hex,
     };
 
     if cmd == "status" || cmd == "info" {
@@ -330,46 +471,88 @@ fn build_response(
     resp
 }
 
-async fn controller_rpc(req: &Request, state: &ControlState) -> std::result::Result<Bytes, String> {
+fn enqueue_controller_rpc_payload(
+    payload: Bytes,
+    expected_response_id: Option<u8>,
+    timeout_ms: u64,
+    state: &ControlState,
+) -> std::result::Result<
+    (oneshot::Receiver<ControllerRpcResult>, Duration),
+    (control_binary::Status, String),
+> {
     if !state.info.serial_supported {
-        return Err(
+        return Err((
+            control_binary::Status::Unavailable,
             "controller rpc not supported (controller transport is not Serial)".to_string(),
-        );
+        ));
     }
     if !state.serial_open() {
-        return Err("controller rpc unavailable (serial is not open)".to_string());
+        return Err((
+            control_binary::Status::Unavailable,
+            "controller rpc unavailable (serial is not open)".to_string(),
+        ));
     }
-
-    let payload_hex = req
-        .payload_hex
-        .as_deref()
-        .ok_or_else(|| "controller rpc missing payload_hex".to_string())?;
-    let payload = hex_decode(payload_hex)?;
     if payload.is_empty() {
-        return Err("controller rpc payload is empty".to_string());
+        return Err((
+            control_binary::Status::ProtocolError,
+            "controller rpc payload is empty".to_string(),
+        ));
     }
 
-    let timeout = bounded_rpc_timeout(req.timeout_ms);
+    let timeout = bounded_rpc_timeout(Some(timeout_ms));
     let Some(tx) = state.controller_rpc_tx() else {
-        return Err("controller rpc unavailable (no active session)".to_string());
+        return Err((
+            control_binary::Status::Unavailable,
+            "controller rpc unavailable (no active session)".to_string(),
+        ));
     };
 
     let (response_tx, response_rx) = oneshot::channel::<ControllerRpcResult>();
     let request = ControllerRpcRequest {
-        payload: Bytes::from(payload),
-        expected_response_id: req.expected_response_id,
+        expected_request_id: protocol_frame_request_id(&payload),
+        payload,
+        expected_response_id,
         timeout,
         response_tx,
     };
 
-    tx.try_send(request)
-        .map_err(|_| "controller rpc unavailable (session queue full or closed)".to_string())?;
+    tx.try_send(request).map_err(|_| {
+        (
+            control_binary::Status::Unavailable,
+            "controller rpc unavailable (session queue full or closed)".to_string(),
+        )
+    })?;
 
+    Ok((response_rx, timeout))
+}
+
+async fn await_controller_rpc_response(
+    response_rx: oneshot::Receiver<ControllerRpcResult>,
+    timeout: Duration,
+) -> std::result::Result<Bytes, (control_binary::Status, String)> {
     match tokio::time::timeout(timeout + Duration::from_millis(50), response_rx).await {
         Ok(Ok(Ok(payload))) => Ok(payload),
-        Ok(Ok(Err(err))) => Err(controller_rpc_error_message(err)),
-        Ok(Err(_)) => Err("controller rpc disconnected".to_string()),
-        Err(_) => Err("controller rpc timeout".to_string()),
+        Ok(Ok(Err(err))) => Err((
+            binary_status_from_controller_error(err),
+            controller_rpc_error_message(err),
+        )),
+        Ok(Err(_)) => Err((
+            control_binary::Status::Unavailable,
+            "controller rpc disconnected".to_string(),
+        )),
+        Err(_) => Err((
+            control_binary::Status::Timeout,
+            "controller rpc timeout".to_string(),
+        )),
+    }
+}
+
+fn binary_status_from_controller_error(err: ControllerRpcError) -> control_binary::Status {
+    match err {
+        ControllerRpcError::Busy => control_binary::Status::Busy,
+        ControllerRpcError::Disconnected => control_binary::Status::Unavailable,
+        ControllerRpcError::Timeout => control_binary::Status::Timeout,
+        ControllerRpcError::SendFailed => control_binary::Status::SendFailed,
     }
 }
 
@@ -391,43 +574,6 @@ fn controller_rpc_error_message(err: ControllerRpcError) -> String {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn hex_decode(text: &str) -> std::result::Result<Vec<u8>, String> {
-    let text = text.trim();
-    if !text.len().is_multiple_of(2) {
-        return Err("payload_hex must contain an even number of hex digits".to_string());
-    }
-
-    let mut out = Vec::with_capacity(text.len() / 2);
-    let bytes = text.as_bytes();
-    for idx in (0..bytes.len()).step_by(2) {
-        let hi = hex_nibble(bytes[idx])
-            .ok_or_else(|| format!("payload_hex contains non-hex digit at byte {}", idx))?;
-        let lo = hex_nibble(bytes[idx + 1])
-            .ok_or_else(|| format!("payload_hex contains non-hex digit at byte {}", idx + 1))?;
-        out.push((hi << 4) | lo);
-    }
-    Ok(out)
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
 pub fn send_command_blocking(
     port: u16,
     cmd: &str,
@@ -446,9 +592,6 @@ pub fn send_command_blocking(
     let req = serde_json::to_string(&Request {
         schema: Some(CONTROL_SCHEMA),
         cmd: cmd.to_string(),
-        payload_hex: None,
-        expected_response_id: None,
-        timeout_ms: None,
     })
     .map_err(|e| BridgeError::ControlProtocol {
         message: e.to_string(),
@@ -501,22 +644,9 @@ mod tests {
             .resolved_serial_port_tx
             .send_replace(Some("COM3".to_string()));
 
-        let response = build_response("info", &state, true, None, None);
+        let response = build_response("info", &state, true, None);
         assert_eq!(response.instance_id, Some("bitwig-hw-17081760".to_string()));
         assert_eq!(response.controller_serial, Some("17081760".to_string()));
         assert_eq!(response.resolved_serial_port, Some("COM3".to_string()));
-    }
-
-    #[test]
-    fn test_hex_roundtrip() {
-        let bytes = b"\x00\x01\x0f\x10\xab\xff";
-        assert_eq!(hex_encode(bytes), "00010f10abff");
-        assert_eq!(hex_decode("00010F10ABff").unwrap(), bytes);
-    }
-
-    #[test]
-    fn test_hex_decode_rejects_invalid_input() {
-        assert!(hex_decode("abc").is_err());
-        assert!(hex_decode("zz").is_err());
     }
 }

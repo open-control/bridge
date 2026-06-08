@@ -23,6 +23,7 @@ mod codec;
 mod config;
 mod constants;
 mod control;
+mod control_binary;
 mod error;
 mod input;
 mod instance_lock;

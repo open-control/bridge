@@ -10,7 +10,7 @@
 //! - Transport lifecycle (that's the caller's responsibility)
 //! - Reconnection logic (handled by the bridge main loop)
 
-use super::controller_rpc::{ControllerRpcError, ControllerRpcRequest};
+use super::controller_rpc::{protocol_frame_request_id, ControllerRpcError, ControllerRpcRequest};
 use super::guard::{GuardAction, RelayGuard};
 use super::protocol::parse_message_name;
 use super::stats::Stats;
@@ -19,6 +19,7 @@ use crate::error::Result;
 use crate::logging::{self, LogEntry};
 use crate::transport::TransportChannels;
 use bytes::Bytes;
+use std::collections::VecDeque;
 use std::future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -45,7 +46,7 @@ use tokio::sync::{mpsc, oneshot};
 /// let session = BridgeSession::new(
 ///     controller_channels,
 ///     host_channels,
-///     CobsDebugCodec::new(4096),
+///     CobsDebugCodec::new(cobs::MAX_FRAME_SIZE),
 ///     stats,
 ///     Some(log_tx),
 /// );
@@ -68,11 +69,14 @@ pub struct BridgeSession<C: Codec> {
     start_time: Instant,
     /// Optional local management requests to send through the controller link.
     controller_rpc_rx: Option<mpsc::Receiver<ControllerRpcRequest>>,
-    pending_controller_rpc: Option<PendingControllerRpc>,
+    pending_controller_rpcs: VecDeque<PendingControllerRpc>,
 }
+
+const MAX_PENDING_CONTROLLER_RPCS: usize = 8;
 
 struct PendingControllerRpc {
     expected_response_id: Option<u8>,
+    expected_request_id: Option<u16>,
     deadline: Instant,
     response_tx: oneshot::Sender<std::result::Result<Bytes, ControllerRpcError>>,
 }
@@ -95,7 +99,7 @@ impl<C: Codec> BridgeSession<C> {
             guard: RelayGuard::default(),
             start_time: Instant::now(),
             controller_rpc_rx: None,
-            pending_controller_rpc: None,
+            pending_controller_rpcs: VecDeque::new(),
         }
     }
 
@@ -161,7 +165,7 @@ impl<C: Codec> BridgeSession<C> {
             }
         }
 
-        self.fail_pending_controller_rpc(ControllerRpcError::Disconnected);
+        self.fail_pending_controller_rpcs(ControllerRpcError::Disconnected);
         Ok(())
     }
 
@@ -239,7 +243,7 @@ impl<C: Codec> BridgeSession<C> {
     }
 
     fn handle_controller_rpc_request(&mut self, request: ControllerRpcRequest) {
-        if self.pending_controller_rpc.is_some() {
+        if self.pending_controller_rpcs.len() >= MAX_PENDING_CONTROLLER_RPCS {
             let _ = request.response_tx.send(Err(ControllerRpcError::Busy));
             return;
         }
@@ -253,28 +257,34 @@ impl<C: Codec> BridgeSession<C> {
 
         let pending = PendingControllerRpc {
             expected_response_id: request.expected_response_id,
+            expected_request_id: request.expected_request_id,
             deadline: Instant::now() + request.timeout,
             response_tx: request.response_tx,
         };
-        self.pending_controller_rpc = Some(pending);
 
-        if !self.send_to_controller(request.payload) {
-            self.fail_pending_controller_rpc(ControllerRpcError::SendFailed);
+        if self.send_to_controller(request.payload) {
+            self.pending_controller_rpcs.push_back(pending);
+        } else {
+            let _ = pending
+                .response_tx
+                .send(Err(ControllerRpcError::SendFailed));
         }
     }
 
     fn complete_pending_controller_rpc(&mut self, payload: &Bytes) -> bool {
-        let Some(pending) = self.pending_controller_rpc.as_ref() else {
+        if self.pending_controller_rpcs.is_empty() {
+            return false;
+        }
+
+        let Some(index) = self
+            .pending_controller_rpcs
+            .iter()
+            .position(|pending| pending.matches_payload(payload))
+        else {
             return false;
         };
 
-        if let Some(expected) = pending.expected_response_id {
-            if payload.first().copied() != Some(expected) {
-                return false;
-            }
-        }
-
-        let Some(pending) = self.pending_controller_rpc.take() else {
+        let Some(pending) = self.pending_controller_rpcs.remove(index) else {
             return false;
         };
         let _ = pending.response_tx.send(Ok(payload.clone()));
@@ -282,17 +292,23 @@ impl<C: Codec> BridgeSession<C> {
     }
 
     fn expire_pending_controller_rpc(&mut self) {
-        let Some(pending) = self.pending_controller_rpc.as_ref() else {
-            return;
-        };
-        if Instant::now() < pending.deadline {
+        if self.pending_controller_rpcs.is_empty() {
             return;
         }
-        self.fail_pending_controller_rpc(ControllerRpcError::Timeout);
+
+        let now = Instant::now();
+        let mut pending = std::mem::take(&mut self.pending_controller_rpcs);
+        while let Some(item) = pending.pop_front() {
+            if now >= item.deadline {
+                let _ = item.response_tx.send(Err(ControllerRpcError::Timeout));
+            } else {
+                self.pending_controller_rpcs.push_back(item);
+            }
+        }
     }
 
-    fn fail_pending_controller_rpc(&mut self, err: ControllerRpcError) {
-        if let Some(pending) = self.pending_controller_rpc.take() {
+    fn fail_pending_controller_rpcs(&mut self, err: ControllerRpcError) {
+        while let Some(pending) = self.pending_controller_rpcs.pop_front() {
             let _ = pending.response_tx.send(Err(err));
         }
     }
@@ -307,6 +323,20 @@ impl<C: Codec> BridgeSession<C> {
 
     fn elapsed_ms(&self) -> u64 {
         self.start_time.elapsed().as_millis() as u64
+    }
+}
+
+impl PendingControllerRpc {
+    fn matches_payload(&self, payload: &Bytes) -> bool {
+        let first_byte = payload.first().copied();
+        if self.expected_response_id.is_some() && self.expected_response_id != first_byte {
+            return false;
+        }
+
+        match self.expected_request_id {
+            Some(expected) => protocol_frame_request_id(payload) == Some(expected),
+            None => true,
+        }
     }
 }
 
@@ -584,6 +614,7 @@ mod tests {
             .send(ControllerRpcRequest {
                 payload: Bytes::from_static(&[0xE0, 0x01]),
                 expected_response_id: Some(0xE1),
+                expected_request_id: None,
                 timeout: Duration::from_secs(1),
                 response_tx,
             })
@@ -600,6 +631,154 @@ mod tests {
 
         let response = response_rx.await.unwrap().unwrap();
         assert_eq!(response.as_ref(), &[0xE1, 0x00, 0x2A]);
+        assert!(host_out_rx.try_recv().is_err());
+
+        shutdown.store(true, Ordering::SeqCst);
+        drop(ctrl_in_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_controller_rpc_allows_multiple_pending_requests() {
+        let (ctrl_in_tx, ctrl_in_rx) = mpsc::channel(16);
+        let (ctrl_out_tx, mut ctrl_out_rx) = mpsc::channel(16);
+        let (_host_in_tx, host_in_rx) = mpsc::channel(16);
+        let (host_out_tx, mut host_out_rx) = mpsc::channel(16);
+        let (rpc_tx, rpc_rx) = mpsc::channel(16);
+
+        let controller = TransportChannels {
+            rx: ctrl_in_rx,
+            tx: ctrl_out_tx,
+        };
+        let host = TransportChannels {
+            rx: host_in_rx,
+            tx: host_out_tx,
+        };
+
+        let stats = Arc::new(Stats::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let session =
+            BridgeSession::new(controller, host, RawCodec, stats, None).with_controller_rpc(rpc_rx);
+        let shutdown_clone = shutdown.clone();
+        let handle = tokio::spawn(async move { session.run(shutdown_clone).await });
+
+        let (first_tx, first_rx) = oneshot::channel();
+        let (second_tx, second_rx) = oneshot::channel();
+        rpc_tx
+            .send(ControllerRpcRequest {
+                payload: Bytes::from_static(&[0xE8, 0x01]),
+                expected_response_id: Some(0xE9),
+                expected_request_id: None,
+                timeout: Duration::from_secs(1),
+                response_tx: first_tx,
+            })
+            .await
+            .unwrap();
+        rpc_tx
+            .send(ControllerRpcRequest {
+                payload: Bytes::from_static(&[0xE8, 0x02]),
+                expected_response_id: Some(0xE9),
+                expected_request_id: None,
+                timeout: Duration::from_secs(1),
+                response_tx: second_tx,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(ctrl_out_rx.recv().await.unwrap().as_ref(), &[0xE8, 0x01]);
+        assert_eq!(ctrl_out_rx.recv().await.unwrap().as_ref(), &[0xE8, 0x02]);
+
+        ctrl_in_tx
+            .send(Bytes::from_static(&[0xE9, 0x00, 0x01]))
+            .await
+            .unwrap();
+        ctrl_in_tx
+            .send(Bytes::from_static(&[0xE9, 0x00, 0x02]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first_rx.await.unwrap().unwrap().as_ref(),
+            &[0xE9, 0x00, 0x01]
+        );
+        assert_eq!(
+            second_rx.await.unwrap().unwrap().as_ref(),
+            &[0xE9, 0x00, 0x02]
+        );
+        assert!(host_out_rx.try_recv().is_err());
+
+        shutdown.store(true, Ordering::SeqCst);
+        drop(ctrl_in_tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_controller_rpc_matches_same_response_id_by_request_id() {
+        let (ctrl_in_tx, ctrl_in_rx) = mpsc::channel(16);
+        let (ctrl_out_tx, mut ctrl_out_rx) = mpsc::channel(16);
+        let (_host_in_tx, host_in_rx) = mpsc::channel(16);
+        let (host_out_tx, mut host_out_rx) = mpsc::channel(16);
+        let (rpc_tx, rpc_rx) = mpsc::channel(16);
+
+        let controller = TransportChannels {
+            rx: ctrl_in_rx,
+            tx: ctrl_out_tx,
+        };
+        let host = TransportChannels {
+            rx: host_in_rx,
+            tx: host_out_tx,
+        };
+
+        let stats = Arc::new(Stats::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let session =
+            BridgeSession::new(controller, host, RawCodec, stats, None).with_controller_rpc(rpc_rx);
+        let shutdown_clone = shutdown.clone();
+        let handle = tokio::spawn(async move { session.run(shutdown_clone).await });
+
+        let (first_tx, first_rx) = oneshot::channel();
+        let (second_tx, second_rx) = oneshot::channel();
+        rpc_tx
+            .send(ControllerRpcRequest {
+                payload: Bytes::from_static(&[0xE8, 0x00, 0x01, 0x01, 0x00]),
+                expected_response_id: Some(0xE9),
+                expected_request_id: Some(1),
+                timeout: Duration::from_secs(1),
+                response_tx: first_tx,
+            })
+            .await
+            .unwrap();
+        rpc_tx
+            .send(ControllerRpcRequest {
+                payload: Bytes::from_static(&[0xE8, 0x00, 0x01, 0x02, 0x00]),
+                expected_response_id: Some(0xE9),
+                expected_request_id: Some(2),
+                timeout: Duration::from_secs(1),
+                response_tx: second_tx,
+            })
+            .await
+            .unwrap();
+
+        let _ = ctrl_out_rx.recv().await.unwrap();
+        let _ = ctrl_out_rx.recv().await.unwrap();
+
+        ctrl_in_tx
+            .send(Bytes::from_static(&[0xE9, 0x00, 0x01, 0x02, 0x00]))
+            .await
+            .unwrap();
+        ctrl_in_tx
+            .send(Bytes::from_static(&[0xE9, 0x00, 0x01, 0x01, 0x00]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            second_rx.await.unwrap().unwrap().as_ref(),
+            &[0xE9, 0x00, 0x01, 0x02, 0x00]
+        );
+        assert_eq!(
+            first_rx.await.unwrap().unwrap().as_ref(),
+            &[0xE9, 0x00, 0x01, 0x01, 0x00]
+        );
         assert!(host_out_rx.try_recv().is_err());
 
         shutdown.store(true, Ordering::SeqCst);
@@ -636,6 +815,7 @@ mod tests {
             .send(ControllerRpcRequest {
                 payload: Bytes::from_static(&[0xE0, 0x01]),
                 expected_response_id: Some(0xE1),
+                expected_request_id: None,
                 timeout: Duration::from_secs(1),
                 response_tx,
             })

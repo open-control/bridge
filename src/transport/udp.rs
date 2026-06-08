@@ -63,7 +63,7 @@ impl Transport for UdpTransport {
         let addr_store = client_addr.clone();
         let shutdown_rx = shutdown.clone();
         tokio::spawn(async move {
-            let mut buf = [0u8; UDP_BUFFER_SIZE];
+            let mut buf = vec![0u8; UDP_BUFFER_SIZE];
 
             while !shutdown_rx.load(Ordering::Relaxed) {
                 match tokio::time::timeout(
