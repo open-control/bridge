@@ -9,8 +9,8 @@ use std::fmt;
 /// COBS frame delimiter
 pub const DELIMITER: u8 = 0x00;
 
-/// Maximum frame size for COBS encoding
-pub const MAX_FRAME_SIZE: usize = 4096;
+/// Maximum frame size for COBS encoding.
+pub const MAX_FRAME_SIZE: usize = 32768;
 
 #[derive(Debug)]
 pub enum CobsError {

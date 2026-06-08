@@ -32,7 +32,7 @@ impl CobsDebugCodec {
 
 impl Default for CobsDebugCodec {
     fn default() -> Self {
-        Self::new(4096)
+        Self::new(cobs::MAX_FRAME_SIZE)
     }
 }
 
@@ -56,7 +56,7 @@ impl Codec for CobsDebugCodec {
                     }
                 }
                 self.buffer.clear();
-            } else if byte == b'\n' {
+            } else if byte == b'\n' && looks_like_debug_line(&self.buffer) {
                 // Text line complete (debug log)
                 self.buffer.pop(); // Remove \n
                 if self.buffer.last() == Some(&b'\r') {
@@ -82,6 +82,10 @@ impl Codec for CobsDebugCodec {
     fn encode(&self, payload: &[u8], output: &mut Vec<u8>) {
         let _ = cobs::encode_into(payload, output);
     }
+}
+
+fn looks_like_debug_line(buffer: &[u8]) -> bool {
+    matches!(buffer.first(), Some(b'['))
 }
 
 #[cfg(test)]
@@ -116,6 +120,27 @@ mod tests {
         assert_eq!(frames.len(), 1);
         if let Frame::Message { payload, .. } = &frames[0] {
             assert_eq!(payload.as_ref(), &[0x01, 0x02, 0x03]);
+        } else {
+            panic!("Expected Message frame");
+        }
+    }
+
+    #[test]
+    fn test_decode_protocol_message_with_newline_byte() {
+        let mut codec = CobsDebugCodec::default();
+        let mut frames = Vec::new();
+        let payload = [0xE5, 0x01, 0x0A, 0x35, 0x20, 0x66];
+        let mut encoded = Vec::new();
+
+        codec.encode(&payload, &mut encoded);
+        codec.decode(&encoded, |f| frames.push(f));
+
+        assert_eq!(frames.len(), 1);
+        if let Frame::Message {
+            payload: decoded, ..
+        } = &frames[0]
+        {
+            assert_eq!(decoded.as_ref(), payload);
         } else {
             panic!("Expected Message frame");
         }

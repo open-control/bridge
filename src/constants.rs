@@ -102,8 +102,10 @@ pub const SIDEBAR_WIDTH: u16 = 16;
 // Buffers
 // =============================================================================
 
-/// UDP receive buffer size
-pub const UDP_BUFFER_SIZE: usize = 4096;
+/// Transport receive buffer size.
+///
+/// Must be large enough to hold the largest encoded COBS controller frame.
+pub const UDP_BUFFER_SIZE: usize = 32768;
 
 /// Channel capacity for async message passing
 pub const CHANNEL_CAPACITY: usize = 256;

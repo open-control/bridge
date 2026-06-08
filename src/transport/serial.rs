@@ -185,7 +185,7 @@ impl Transport for SerialTransport {
         let shutdown_reader = shutdown.clone();
         std::thread::spawn(move || {
             let mut port = port_read;
-            let mut buf = [0u8; UDP_BUFFER_SIZE];
+            let mut buf = vec![0u8; UDP_BUFFER_SIZE];
             let mut consecutive_errors = 0u32;
 
             while !shutdown_reader.load(Ordering::Relaxed) {
