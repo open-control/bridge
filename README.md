@@ -60,6 +60,12 @@ oc-bridge --headless --controller websocket
 oc-bridge --daemon --port COM3 --udp-port 9000
 ```
 
+Host UDP port convention:
+
+- `9000..9007`: hardware controllers
+- `9100..9107`: native desktop simulators
+- `9200..9207`: WASM/browser simulators
+
 ### TUI Controls
 
 | Key | Action |

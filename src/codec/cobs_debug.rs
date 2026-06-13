@@ -85,7 +85,27 @@ impl Codec for CobsDebugCodec {
 }
 
 fn looks_like_debug_line(buffer: &[u8]) -> bool {
-    matches!(buffer.first(), Some(b'['))
+    let mut index = 0;
+
+    while index < buffer.len() {
+        if buffer[index] == 0x1b && buffer.get(index + 1) == Some(&b'[') {
+            index += 2;
+
+            while index < buffer.len() {
+                let byte = buffer[index];
+                index += 1;
+
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        return buffer[index] == b'[';
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -104,6 +124,25 @@ mod tests {
         if let Frame::DebugLog { level, message } = &frames[0] {
             assert_eq!(*level, Some(LogLevel::Info));
             assert_eq!(message, "Test");
+        } else {
+            panic!("Expected DebugLog frame");
+        }
+    }
+
+    #[test]
+    fn test_decode_ansi_prefixed_debug_log() {
+        let mut codec = CobsDebugCodec::default();
+        let mut frames = Vec::new();
+
+        codec.decode(
+            b"\x1b[2m[1234ms] \x1b[0m\x1b[32mINFO: \x1b[0mBoot completed\n",
+            |f| frames.push(f),
+        );
+
+        assert_eq!(frames.len(), 1);
+        if let Frame::DebugLog { level, message } = &frames[0] {
+            assert_eq!(*level, Some(LogLevel::Info));
+            assert_eq!(message, "Boot completed");
         } else {
             panic!("Expected DebugLog frame");
         }
