@@ -3,7 +3,7 @@
 # =============================================================================
 # Port convention:
 #   Controller (8xxx): 800X = UDP native, 810X = WS wasm (X = app index)
-#   Host (9xxx):       9000 = hardware, 9001 = native sim, 9002 = wasm sim
+#   Host (9xxx):       9000..9007 = hardware, 9100..9107 = native, 9200..9207 = wasm
 # =============================================================================
 
 [bridge]
@@ -19,7 +19,7 @@ controller_udp_port = 8000
 controller_websocket_port = 8100
 
 # Host ports (Bridge → Bitwig)
-# 9000=hardware, 9001=native sim, 9002=wasm sim
+# 9000..9007=hardware, 9100..9107=native sim, 9200..9207=wasm sim
 host_transport = "udp"
 host_udp_port = 9000
 host_websocket_port = 8000
