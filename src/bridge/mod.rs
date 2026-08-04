@@ -27,6 +27,7 @@
 
 pub mod controller_rpc;
 pub mod guard;
+pub mod persistence_job_protocol;
 pub mod protocol;
 pub mod session;
 pub mod stats;

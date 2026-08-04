@@ -157,6 +157,8 @@ pub struct Response {
     pub log_broadcast_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub control_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persistence_job_protocol_version: Option<u8>,
 }
 
 pub async fn bind_listener(port: u16) -> Result<TcpListener> {
@@ -454,6 +456,7 @@ fn build_response(cmd: &str, state: &ControlState, ok: bool, message: Option<Str
         host_udp_port: None,
         log_broadcast_port: None,
         control_port: None,
+        persistence_job_protocol_version: None,
     };
 
     if cmd == "status" || cmd == "info" {
@@ -467,6 +470,8 @@ fn build_response(cmd: &str, state: &ControlState, ok: bool, message: Option<Str
         resp.host_udp_port = Some(info.host_udp_port);
         resp.log_broadcast_port = Some(info.log_broadcast_port);
         resp.control_port = Some(info.control_port);
+        resp.persistence_job_protocol_version =
+            Some(crate::bridge::persistence_job_protocol::BRIDGE_JOB_PROTOCOL_VERSION);
     }
     resp
 }
@@ -648,5 +653,21 @@ mod tests {
         assert_eq!(response.instance_id, Some("bitwig-hw-17081760".to_string()));
         assert_eq!(response.controller_serial, Some("17081760".to_string()));
         assert_eq!(response.resolved_serial_port, Some("COM3".to_string()));
+        assert_eq!(response.persistence_job_protocol_version, Some(1));
+
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            serialized
+                .get("persistence_job_protocol_version")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+
+        let ping = build_response("ping", &state, true, None);
+        assert_eq!(ping.persistence_job_protocol_version, None);
+        assert!(serde_json::to_value(&ping)
+            .unwrap()
+            .get("persistence_job_protocol_version")
+            .is_none());
     }
 }

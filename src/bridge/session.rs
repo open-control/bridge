@@ -12,6 +12,7 @@
 
 use super::controller_rpc::{protocol_frame_request_id, ControllerRpcError, ControllerRpcRequest};
 use super::guard::{GuardAction, RelayGuard};
+use super::persistence_job_protocol::is_reserved_job_response;
 use super::protocol::parse_message_name;
 use super::stats::Stats;
 use crate::codec::{Codec, Frame};
@@ -191,6 +192,13 @@ impl<C: Codec> BridgeSession<C> {
                     }
 
                     if self.complete_pending_controller_rpc(&payload) {
+                        continue;
+                    }
+
+                    // A job response can outlive its local waiter. Unlike an
+                    // ordinary controller message, it is point-to-point RPC
+                    // state and must never leak onto the Bitwig host path.
+                    if is_reserved_job_response(&payload) {
                         continue;
                     }
 
@@ -636,6 +644,91 @@ mod tests {
         shutdown.store(true, Ordering::SeqCst);
         drop(ctrl_in_tx);
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_controller_rpc_captures_job_response_before_quarantine() {
+        let (ctrl_in_tx, ctrl_in_rx) = mpsc::channel(16);
+        let (ctrl_out_tx, mut ctrl_out_rx) = mpsc::channel(16);
+        let (_host_in_tx, host_in_rx) = mpsc::channel(16);
+        let (host_out_tx, mut host_out_rx) = mpsc::channel(16);
+        let (rpc_tx, rpc_rx) = mpsc::channel(16);
+
+        let controller = TransportChannels {
+            rx: ctrl_in_rx,
+            tx: ctrl_out_tx,
+        };
+        let host = TransportChannels {
+            rx: host_in_rx,
+            tx: host_out_tx,
+        };
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let session = BridgeSession::new(controller, host, RawCodec, Arc::new(Stats::new()), None)
+            .with_controller_rpc(rpc_rx);
+        let shutdown_clone = shutdown.clone();
+        let handle = tokio::spawn(async move { session.run(shutdown_clone).await });
+
+        let (response_tx, response_rx) = oneshot::channel();
+        rpc_tx
+            .send(ControllerRpcRequest {
+                payload: Bytes::from_static(&[0xFC, 0x00]),
+                expected_response_id: Some(0xFD),
+                expected_request_id: None,
+                timeout: Duration::from_secs(1),
+                response_tx,
+            })
+            .await
+            .unwrap();
+        assert_eq!(ctrl_out_rx.recv().await.unwrap().as_ref(), &[0xFC, 0x00]);
+
+        ctrl_in_tx
+            .send(Bytes::from_static(&[0xFD, 0x00, 0x2A]))
+            .await
+            .unwrap();
+        assert_eq!(
+            response_rx.await.unwrap().unwrap().as_ref(),
+            &[0xFD, 0x00, 0x2A]
+        );
+        assert!(host_out_rx.try_recv().is_err());
+
+        shutdown.store(true, Ordering::SeqCst);
+        drop(ctrl_in_tx);
+        let _ = handle.await;
+    }
+
+    #[test]
+    fn test_expired_job_response_is_quarantined_without_timing_sleep() {
+        let (_ctrl_in_tx, ctrl_in_rx) = mpsc::channel(16);
+        let (ctrl_out_tx, _ctrl_out_rx) = mpsc::channel(16);
+        let (_host_in_tx, host_in_rx) = mpsc::channel(16);
+        let (host_out_tx, mut host_out_rx) = mpsc::channel(16);
+
+        let controller = TransportChannels {
+            rx: ctrl_in_rx,
+            tx: ctrl_out_tx,
+        };
+        let host = TransportChannels {
+            rx: host_in_rx,
+            tx: host_out_tx,
+        };
+        let mut session =
+            BridgeSession::new(controller, host, RawCodec, Arc::new(Stats::new()), None);
+        let (response_tx, mut response_rx) = oneshot::channel();
+        session
+            .pending_controller_rpcs
+            .push_back(PendingControllerRpc {
+                expected_response_id: Some(0xFD),
+                expected_request_id: None,
+                deadline: Instant::now(),
+                response_tx,
+            });
+
+        session.expire_pending_controller_rpc();
+        assert_eq!(response_rx.try_recv(), Ok(Err(ControllerRpcError::Timeout)));
+
+        session.relay_controller_to_host(Bytes::from_static(&[0xFD, 0x00, 0x2A]));
+        assert!(host_out_rx.try_recv().is_err());
     }
 
     #[tokio::test]
