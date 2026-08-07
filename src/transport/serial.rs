@@ -11,6 +11,8 @@
 
 use super::{Transport, TransportChannels};
 use crate::config::DeviceConfig;
+#[cfg(windows)]
+use crate::constants::SERIAL_HEALTH_CHECK_INTERVAL_MS;
 use crate::constants::{CHANNEL_CAPACITY, SERIAL_DISCONNECT_THRESHOLD, UDP_BUFFER_SIZE};
 use crate::error::{BridgeError, Result};
 use crate::platform;
@@ -19,6 +21,8 @@ use serialport::{SerialPortInfo, SerialPortType};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(windows)]
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// Serial transport for USB CDC communication
@@ -186,12 +190,14 @@ impl Transport for SerialTransport {
         std::thread::spawn(move || {
             let mut port = port_read;
             let mut buf = vec![0u8; UDP_BUFFER_SIZE];
-            let mut consecutive_errors = 0u32;
+            let mut consecutive_zero_reads = 0u32;
+            #[cfg(windows)]
+            let mut next_health_check = Instant::now();
 
             while !shutdown_reader.load(Ordering::Relaxed) {
                 match port.read(&mut buf) {
                     Ok(n) if n > 0 => {
-                        consecutive_errors = 0;
+                        consecutive_zero_reads = 0;
                         // Send to channel (blocking)
                         if in_tx
                             .blocking_send(Bytes::copy_from_slice(&buf[..n]))
@@ -203,15 +209,28 @@ impl Transport for SerialTransport {
                     }
                     Ok(_) => {
                         // Zero bytes read - could be normal or port gone
-                        consecutive_errors += 1;
-                        if consecutive_errors > SERIAL_DISCONNECT_THRESHOLD {
+                        consecutive_zero_reads += 1;
+                        if consecutive_zero_reads > SERIAL_DISCONNECT_THRESHOLD {
                             // Port likely disconnected
                             break;
                         }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                        // Normal timeout, reset error counter
-                        consecutive_errors = 0;
+                        // An idle Windows COM port and a stale USB CDC handle can
+                        // both surface as a read timeout. Probe the handle at a
+                        // bounded rate so physical removal closes the session and
+                        // lets the runner reopen the newly enumerated device.
+                        #[cfg(windows)]
+                        {
+                            let now = Instant::now();
+                            if now >= next_health_check {
+                                next_health_check =
+                                    now + Duration::from_millis(SERIAL_HEALTH_CHECK_INTERVAL_MS);
+                                if port.bytes_to_read().is_err() {
+                                    break;
+                                }
+                            }
+                        }
                     }
                     Err(_) => {
                         // Serial error - port disconnected
@@ -219,6 +238,9 @@ impl Transport for SerialTransport {
                     }
                 }
             }
+            // Wake the session and the writer even when only the read side
+            // notices the disconnect.
+            shutdown_reader.store(true, Ordering::SeqCst);
             // Channel will be closed when in_tx is dropped
         });
 
@@ -247,6 +269,9 @@ impl Transport for SerialTransport {
                     }
                 }
             }
+            // A write-side failure must tear down the whole session; otherwise
+            // the reader can remain idle forever on a stale Windows COM handle.
+            shutdown_writer.store(true, Ordering::SeqCst);
             // Channel will be closed when out_rx is dropped
         });
 
