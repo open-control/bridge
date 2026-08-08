@@ -117,3 +117,11 @@ pub const CHANNEL_CAPACITY: usize = 256;
 
 /// Consecutive zero-byte reads before assuming port disconnected
 pub const SERIAL_DISCONNECT_THRESHOLD: u32 = 10;
+
+/// Interval between active serial handle health checks on Windows.
+///
+/// USB CDC removal can leave an open COM handle returning ordinary read
+/// timeouts. A periodic `ClearCommError` probe distinguishes that stale handle
+/// from a healthy but idle controller without adding work to every read poll.
+#[cfg(windows)]
+pub const SERIAL_HEALTH_CHECK_INTERVAL_MS: u64 = 250;

@@ -10,7 +10,10 @@
 //! - Transport lifecycle (that's the caller's responsibility)
 //! - Reconnection logic (handled by the bridge main loop)
 
-use super::controller_rpc::{protocol_frame_request_id, ControllerRpcError, ControllerRpcRequest};
+use super::controller_rpc::{
+    protocol_frame_request_id, protocol_response_id_matches, ControllerRpcError,
+    ControllerRpcRequest,
+};
 use super::guard::{GuardAction, RelayGuard};
 use super::persistence_job_protocol::is_reserved_job_response;
 use super::protocol::parse_message_name;
@@ -337,7 +340,7 @@ impl<C: Codec> BridgeSession<C> {
 impl PendingControllerRpc {
     fn matches_payload(&self, payload: &Bytes) -> bool {
         let first_byte = payload.first().copied();
-        if self.expected_response_id.is_some() && self.expected_response_id != first_byte {
+        if !protocol_response_id_matches(self.expected_response_id, first_byte) {
             return false;
         }
 
@@ -644,6 +647,24 @@ mod tests {
         shutdown.store(true, Ordering::SeqCst);
         drop(ctrl_in_tx);
         let _ = handle.await;
+    }
+
+    #[test]
+    fn test_controller_rpc_captures_filesystem_error_by_request_id() {
+        let (response_tx, _response_rx) = oneshot::channel();
+        let pending = PendingControllerRpc {
+            expected_response_id: Some(0xF7),
+            expected_request_id: Some(0x1234),
+            deadline: Instant::now() + Duration::from_secs(1),
+            response_tx,
+        };
+
+        assert!(
+            pending.matches_payload(&Bytes::from_static(&[0xEF, 0x00, 0x01, 0x34, 0x12, 0x04,]))
+        );
+        assert!(
+            !pending.matches_payload(&Bytes::from_static(&[0xEF, 0x00, 0x01, 0x35, 0x12, 0x04,]))
+        );
     }
 
     #[tokio::test]

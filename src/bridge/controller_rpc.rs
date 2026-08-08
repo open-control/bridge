@@ -19,6 +19,30 @@ pub struct ControllerRpcRequest {
 
 pub type ControllerRpcResult = std::result::Result<Bytes, ControllerRpcError>;
 
+const FILESYSTEM_ERROR_RESPONSE_ID: u8 = 0xEF;
+
+fn is_filesystem_success_response_id(message_id: u8) -> bool {
+    matches!(
+        message_id,
+        0xE1 | 0xE3 | 0xE5 | 0xE7 | 0xE9 | 0xEB | 0xED | 0xF1 | 0xF3 | 0xF5 | 0xF7 | 0xF9 | 0xFB
+    )
+}
+
+/// Match the requested terminal response while preserving the filesystem
+/// protocol's generic, request-correlated error response. Without this
+/// alternate terminal id, a controller-side BUSY or STORAGE_ERROR is received
+/// on the serial link but the local caller waits until a false RPC timeout.
+pub(super) fn protocol_response_id_matches(expected: Option<u8>, actual: Option<u8>) -> bool {
+    match expected {
+        None => true,
+        Some(expected) => {
+            actual == Some(expected)
+                || (actual == Some(FILESYSTEM_ERROR_RESPONSE_ID)
+                    && is_filesystem_success_response_id(expected))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerRpcError {
     Busy,
@@ -57,7 +81,7 @@ impl std::fmt::Display for ControllerRpcError {
 
 #[cfg(test)]
 mod tests {
-    use super::protocol_frame_request_id;
+    use super::{protocol_frame_request_id, protocol_response_id_matches};
 
     #[test]
     fn protocol_frame_request_id_reads_named_frame_layout() {
@@ -83,5 +107,22 @@ mod tests {
             protocol_frame_request_id(&[0xE8, 0x02, b'f', b's', 0x01, 0x34]),
             None
         );
+    }
+
+    #[test]
+    fn filesystem_error_is_an_alternate_terminal_response() {
+        for expected in [
+            0xE1, 0xE3, 0xE5, 0xE7, 0xE9, 0xEB, 0xED, 0xF1, 0xF3, 0xF5, 0xF7, 0xF9, 0xFB,
+        ] {
+            assert!(protocol_response_id_matches(Some(expected), Some(0xEF)));
+        }
+        assert!(protocol_response_id_matches(Some(0xF7), Some(0xF7)));
+    }
+
+    #[test]
+    fn filesystem_error_does_not_capture_other_protocol_waiters() {
+        assert!(!protocol_response_id_matches(Some(0xFD), Some(0xEF)));
+        assert!(!protocol_response_id_matches(Some(0xE1), Some(0xE3)));
+        assert!(protocol_response_id_matches(None, Some(0xEF)));
     }
 }
