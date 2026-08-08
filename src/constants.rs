@@ -123,4 +123,5 @@ pub const SERIAL_DISCONNECT_THRESHOLD: u32 = 10;
 /// USB CDC removal can leave an open COM handle returning ordinary read
 /// timeouts. A periodic `ClearCommError` probe distinguishes that stale handle
 /// from a healthy but idle controller without adding work to every read poll.
+#[cfg(windows)]
 pub const SERIAL_HEALTH_CHECK_INTERVAL_MS: u64 = 250;
