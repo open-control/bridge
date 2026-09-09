@@ -146,8 +146,14 @@ async fn run_transfer(lose_terminal: bool) {
                 dropped = true;
                 continue;
             }
-            let named_mutation = matches!(request.operation, Operation::Mkdir | Operation::Rename)
-                || (request.operation == Operation::Delete && request.body.last() == Some(&1));
+            let named_mutation = matches!(
+                request.operation,
+                Operation::Mkdir
+                    | Operation::Rename
+                    | Operation::ConditionalReplace
+                    | Operation::ConditionalDelete
+            ) || (request.operation == Operation::Delete
+                && request.body.last() == Some(&1));
             if named_mutation && !mutation_losses.contains(&request.operation) {
                 assert!(matches!(decoded.state, State::Complete | State::Pending));
                 mutation_losses.push(request.operation);
@@ -186,10 +192,10 @@ async fn run_transfer(lose_terminal: bool) {
         }
         assert!(dropped);
         assert_eq!(replay, !lose_terminal);
-        assert_eq!(chunks, 19);
-        assert_eq!(upload_ids.len(), 16);
-        assert_eq!(mutation_losses.len(), 3);
-        assert_eq!(mutation_replays, 3);
+        assert_eq!(chunks, 21);
+        assert_eq!(upload_ids.len(), 18);
+        assert_eq!(mutation_losses.len(), 5);
+        assert_eq!(mutation_replays, 5);
         assert_eq!(reordered, 1);
         assert_eq!(pages, 2);
         input.shutdown().await.unwrap();
@@ -362,6 +368,81 @@ async fn run_transfer(lose_terminal: bool) {
             filesystem_rpc::Error::NotFound
         ))
     ));
+    // Published SHA-256 test values for "abc" and "hello"; the client forwards
+    // them as transaction preconditions, and Core computes the observed hashes.
+    let abc = [
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22,
+        0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00,
+        0x15, 0xad,
+    ];
+    let hello = [
+        0x2c, 0xf2, 0x4d, 0xba, 0x5f, 0xb0, 0xa3, 0x0e, 0x26, 0xe8, 0x3b, 0x2a, 0xc5, 0xb9, 0xe2,
+        0x9e, 0x1b, 0x16, 0x1e, 0x5c, 0x1f, 0xa7, 0x42, 0x5e, 0x73, 0x04, 0x33, 0x62, 0x93, 0x8b,
+        0x98, 0x24,
+    ];
+    client
+        .upload("projects/conditional.bin", b"abc", 0x40000001)
+        .await
+        .unwrap();
+    client
+        .upload("tmp/replacement.bin", b"hello", 0x40000002)
+        .await
+        .unwrap();
+    let applied = client
+        .conditional_replace(
+            "projects/conditional.bin",
+            "tmp/replacement.bin",
+            &abc,
+            &hello,
+            0x40000003,
+        )
+        .await
+        .unwrap();
+    assert_eq!(applied.outcome, 1);
+    assert_eq!(
+        client.read("projects/conditional.bin", 0, 5).await.unwrap(),
+        b"hello"
+    );
+    let repeated = client
+        .conditional_replace(
+            "projects/conditional.bin",
+            "tmp/replacement.bin",
+            &abc,
+            &hello,
+            0x40000004,
+        )
+        .await
+        .unwrap();
+    assert_eq!(repeated.outcome, 2);
+    match client
+        .conditional_delete("projects/conditional.bin", &abc, 0x40000005)
+        .await
+    {
+        Err(controller_fs_unified::Failure::Conditional(
+            filesystem_rpc::Error::PreconditionFailed,
+            result,
+        )) => {
+            assert_eq!(result.subject, 1);
+            assert_eq!(result.observed, Some(hello));
+        }
+        other => panic!("expected retained precondition with observed hash, got {other:?}"),
+    }
+    assert_eq!(
+        client
+            .conditional_delete("projects/conditional.bin", &hello, 0x40000006)
+            .await
+            .unwrap()
+            .outcome,
+        1
+    );
+    assert_eq!(
+        client
+            .conditional_delete("projects/conditional.bin", &hello, 0x40000007)
+            .await
+            .unwrap()
+            .outcome,
+        2
+    );
     // FIFO barrier: both duplicated read replies have crossed the relay before checking the host.
     client.capabilities().await.unwrap();
     assert!(
@@ -380,7 +461,7 @@ async fn run_transfer(lose_terminal: bool) {
     server_task.await.unwrap().unwrap();
     assert!(child.wait().await.unwrap().success());
     eprintln!(
-        "E2E: 15 uploads (2 x 245765 bytes) + 1 rejected nonce, {} chunks, lost {}={}, retained replay={}, 12 entries/2 pages, 8 reversed reads, mkdir/rename/delete with 3 lost replies and replays, no host leak",
+        "E2E: 17 uploads (2 x 245765 bytes) + 1 rejected nonce, {} chunks, lost {}={}, retained replay={}, 12 entries/2 pages, 8 reversed reads, directory + conditional mutations with 5 lost replies/replays, observed hash and already-applied results, no host leak",
         counts.2,
         if lose_terminal {
             "terminal"

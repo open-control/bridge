@@ -3,7 +3,7 @@ use filesystem_rpc::*;
 #[test]
 fn golden_borrowed_frame_truncation_and_atomic_encode() {
     let golden = [
-        0xfc, 3, 6, 0, 0x34, 0x12, 0, 0, 4, 3, 2, 1, 0, 0, 0, 0, 0x10, 0x27, 0, 0, 4, 0, 0, 0, 7,
+        0xfc, 4, 6, 0, 0x34, 0x12, 0, 0, 4, 3, 2, 1, 0, 0, 0, 0, 0x10, 0x27, 0, 0, 4, 0, 0, 0, 7,
         0, 0, 0,
     ];
     let frame = decode(&golden).unwrap();
@@ -15,6 +15,8 @@ fn golden_borrowed_frame_truncation_and_atomic_encode() {
     assert_eq!(out, golden);
     let mut old_version = golden;
     old_version[1] = 2;
+    assert!(decode(&old_version).is_none());
+    old_version[1] = 3;
     assert!(decode(&old_version).is_none());
     for size in 0..golden.len() {
         assert!(decode(&golden[..size]).is_none());

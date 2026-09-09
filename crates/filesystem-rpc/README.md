@@ -1,4 +1,4 @@
-# Filesystem wire contract v3 — R3c directory mutations
+# Filesystem wire contract v4 — R3d conditional mutations
 
 This unpublished, dependency-free crate owns only the borrowed wire envelope.
 Core implements the same contract in `UnifiedFileSystemRpc.{hpp,cpp}`. It does
@@ -16,11 +16,11 @@ padding or trailing bytes are accepted. Maximum body length is 32,512 bytes.
 | Offset | Type | Meaning |
 | --- | --- | --- |
 | 0 | u8 | `0xfc` request, `0xfd` response |
-| 1 | u8 | Version, exactly `3` |
+| 1 | u8 | Version, exactly `4` |
 | 2 | u8 | Operation, 0 through 14 |
 | 3 | u8 | State in bits 0–6; bit 7 marks a retained mutation replay |
 | 4 | u16 | Nonzero transport request ID, echoed in the response |
-| 6 | u16 | Typed error, 0 through 18 |
+| 6 | u16 | Typed error, 0 through 20 |
 | 8 | u32 | Client mutation nonce |
 | 12 | u32 | Core operation ID |
 | 16 | u32 | Requested deadline or pending-response retry interval, milliseconds |
@@ -37,7 +37,8 @@ body. Requests have error None and never carry the replay flag.
 
 Complete has error None and zero delay. Pending has nonzero identities, error
 None, an empty body and a retry interval from 1 to 10,000 ms. Failed has a
-nonzero error other than Cancelled, an empty body and zero delay; pre-admission
+nonzero error other than Cancelled and zero delay; its body is empty except for
+the conditional result described below. Pre-admission
 failures may have a zero operation ID. Cancelled has error Cancelled, nonzero
 identities, an empty body and zero delay. Short operations cannot be Pending
 or Cancelled. The replay flag is valid only on a retained mutation response
@@ -63,12 +64,12 @@ exactly; successful responses are empty unless specified otherwise.
 | 8 | Mkdir | Path | Empty, retained |
 | 9 | Delete | Path, u8 recursive (0/1) | Empty, retained |
 | 10 | Rename | Source path, destination path | Empty, retained |
-| 11 | ConditionalReplace | Reserved | Unsupported |
-| 12 | ConditionalDelete | Reserved | Unsupported |
+| 11 | ConditionalReplace | 32-byte expected SHA-256, 32-byte replacement SHA-256, current path, staging path | Conditional result |
+| 12 | ConditionalDelete | 32-byte expected SHA-256, current path | Conditional result |
 | 13 | Poll | Empty | Retained operation result |
 | 14 | Cancel | Empty | Cancelled, existing terminal result, or typed refusal |
 
-IDs 6 and 8–12 are retained mutations. R3c advertises mask `0x67ff`, a
+IDs 6 and 8–12 are retained mutations. R3d advertises mask `0x7fff`, a
 30,720-byte chunk limit, 524,288-byte upload limit and 30,000-ms result window.
 One upload may be staged. A fixed registry retains **32 operation results**.
 A terminal record expires at 30,000 ms; a pending operation is never reaped by
@@ -95,9 +96,10 @@ offset overflow and every exact response length, and returns buffers in request
 order. The caller must stream successive batches and handle file changes; this
 API does not promise a multi-request read snapshot or a firmware throughput gain.
 
-Version 3 intentionally rejects the unpublished R2 version 2 envelope because
-upload bodies now use Core-assigned u32 identities rather than client-chosen
-u16 sessions. Negotiate capabilities before mutation; do not silently downgrade.
+Version 4 rejects the unpublished version 2/3 prototypes. Version 3 introduced
+Core-assigned upload identities; version 4 permits bounded conditional details
+on failed results and adds StorageFailure=19 and TooLarge=20. Negotiate
+capabilities before mutation; do not silently downgrade.
 The upload identity is the coordinator's nonzero, non-wrapping job ID. It is
 also the commit's operation ID and cannot address a later upload during that
 coordinator's lifetime, including after result reclamation. A second nonce
@@ -112,13 +114,34 @@ mutations until the existing recovery plan completes. Upload and tree continuati
 share one variant storage area and cannot be active together.
 
 Retained requests compare operation kind, deadline and a SHA-256 fingerprint of
-the complete request body (bounded to 386 bytes for the implemented mutations).
+the complete request body (bounded to 450 bytes for the implemented mutations).
 This uses collision-resistant equality, not a short checksum. Different parameters
 or an operation-kind collision under the same nonce return Conflict. The registry
 does not preserve nonce tombstones beyond the retention window: clients must not
 blindly resubmit a path mutation after expiry or reboot and must reconcile an
 ambiguous outcome. Upload identities additionally prevent a stale upload request
 from addressing a later session during the coordinator lifetime.
+
+Conditional mutations reuse the existing conditional transaction/commit plan and
+journal. Staging must be a nonreserved file under `tmp/`; paths are normalized,
+FAT short-name aliases and identical source/staging paths are rejected. The
+journal's operation ID is Core's assigned job ID. All three continuations share
+one variant storage area. Cancel/deadline may stop before the journal's irreversible
+point; afterward cleanup/recovery owns the durable outcome.
+
+A terminal conditional result has exactly 35 bytes: u8 outcome (None=0,
+Applied=1, AlreadyApplied=2), u8 subject (None=0, Source=1, Staging=2), u8
+has-observed-hash (0/1), and 32 SHA-256 bytes. If the flag is zero all hash bytes
+must be zero. The outcome stays in the body and the error stays in the envelope;
+there is no second legacy status field. Complete returns this body with error
+None. Failed may carry it only for ConditionalReplace, ConditionalDelete, Poll
+or Cancel with a nonzero operation ID. Pre-admission rejections and Cancelled
+have empty bodies. Replays and queries preserve terminal details, including the
+observed digest on a precondition failure. StorageFailure preserves the plan's
+generic storage status without inventing whether the failed primitive was a read
+or write. Failed does not assert that no file changed: durable recovery may remain
+necessary. Reconcile the inner ordinary promotion journal before the conditional
+journal, as ProductStorageRecoveryPlan already does.
 
 Chunks must be sequential. A duplicate or incorrect offset is rejected without
 appending. The Manager does not automatically replay chunks; after a staging

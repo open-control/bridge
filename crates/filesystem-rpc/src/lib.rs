@@ -1,7 +1,7 @@
 //! Borrowed, bounded filesystem wire contract. No transport or operation state.
 pub const REQUEST: u8 = 0xfc;
 pub const RESPONSE: u8 = 0xfd;
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 4;
 pub const HEADER: usize = 24;
 pub const MAX_BODY: usize = 32_512;
 pub const MAX_DEADLINE_MS: u32 = 10_000;
@@ -84,6 +84,8 @@ pub enum Error {
     Internal,
     ResultExpired,
     CancelTooLate,
+    StorageFailure,
+    TooLarge,
 }
 impl Error {
     pub fn decode(value: u16) -> Option<Self> {
@@ -107,6 +109,8 @@ impl Error {
             16 => Self::Internal,
             17 => Self::ResultExpired,
             18 => Self::CancelTooLate,
+            19 => Self::StorageFailure,
+            20 => Self::TooLarge,
             _ => return None,
         })
     }
@@ -199,10 +203,23 @@ impl Frame<'_> {
                         && self.body.is_empty()
                 }
                 State::Failed => {
+                    let details = self.operation_id != 0
+                        && self.body.len() == 35
+                        && matches!(
+                            self.operation,
+                            Operation::ConditionalReplace
+                                | Operation::ConditionalDelete
+                                | Operation::Poll
+                                | Operation::Cancel
+                        )
+                        && self.body[0] <= 2
+                        && self.body[1] <= 2
+                        && self.body[2] <= 1
+                        && (self.body[2] != 0 || self.body[3..].iter().all(|&b| b == 0));
                     self.error != Error::None
                         && self.error != Error::Cancelled
                         && self.delay_ms == 0
-                        && self.body.is_empty()
+                        && (self.body.is_empty() || details)
                 }
                 State::Cancelled => {
                     self.error == Error::Cancelled
