@@ -130,12 +130,14 @@ impl<C: Codec> BridgeSession<C> {
     /// The caller should check the shutdown flag to determine if
     /// reconnection should be attempted.
     pub async fn run(mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
+        let mut housekeeping = tokio::time::interval(std::time::Duration::from_millis(100));
+        housekeeping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 biased;
 
                 // Periodic shutdown check (every 100ms)
-                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                _ = housekeeping.tick() => {
                     if shutdown.load(Ordering::Relaxed) {
                         break;
                     }
@@ -258,6 +260,7 @@ impl<C: Codec> BridgeSession<C> {
     }
 
     fn handle_controller_rpc_request(&mut self, request: ControllerRpcRequest) {
+        self.expire_pending_controller_rpc();
         if self.pending_controller_rpcs.len() >= MAX_PENDING_CONTROLLER_RPCS {
             let _ = request.response_tx.send(Err(ControllerRpcError::Busy));
             return;
@@ -368,6 +371,61 @@ mod tests {
     use crate::codec::RawCodec;
     use std::time::Duration;
     use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn test_housekeeping_survives_continuous_controller_traffic() {
+        let (ctrl_in_tx, ctrl_in_rx) = mpsc::channel(16);
+        let (ctrl_out_tx, _ctrl_out_rx) = mpsc::channel(16);
+        let (_host_in_tx, host_in_rx) = mpsc::channel(16);
+        let (host_out_tx, _host_out_rx) = mpsc::channel(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut session = BridgeSession::new(
+            TransportChannels {
+                rx: ctrl_in_rx,
+                tx: ctrl_out_tx,
+            },
+            TransportChannels {
+                rx: host_in_rx,
+                tx: host_out_tx,
+            },
+            RawCodec,
+            Arc::new(Stats::new()),
+            None,
+        );
+        let (response_tx, response_rx) = oneshot::channel();
+        session
+            .pending_controller_rpcs
+            .push_back(PendingControllerRpc {
+                expected_response_id: Some(0xE1),
+                expected_request_id: None,
+                deadline: Instant::now() + Duration::from_millis(50),
+                response_tx,
+            });
+        // Keep the controller queue ready. Recreating sleep inside select would
+        // indefinitely postpone both expiration and shutdown under this traffic.
+        let producer = tokio::spawn(async move {
+            while ctrl_in_tx
+                .send(Bytes::from_static(&[0xFD, 0x00]))
+                .await
+                .is_ok()
+            {}
+        });
+        let handle = tokio::spawn(session.run(shutdown.clone()));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), response_rx)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(ControllerRpcError::Timeout)
+        ));
+        shutdown.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        producer.await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_session_shutdown() {
