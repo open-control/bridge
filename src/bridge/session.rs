@@ -16,6 +16,10 @@ use super::controller_rpc::{
 };
 use super::guard::{GuardAction, RelayGuard};
 use super::persistence_job_protocol::is_reserved_job_response;
+
+#[cfg(all(test, feature = "unified-rpc-e2e"))]
+#[path = "../../test-support/unified_transfer.rs"]
+mod unified_transfer;
 use super::protocol::parse_message_name;
 use super::stats::Stats;
 use crate::codec::{Codec, Frame};

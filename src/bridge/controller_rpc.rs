@@ -52,6 +52,11 @@ pub enum ControllerRpcError {
 }
 
 pub fn protocol_frame_request_id(payload: &[u8]) -> Option<u16> {
+    if matches!(payload.first(), Some(&filesystem_rpc::REQUEST) | Some(&filesystem_rpc::RESPONSE))
+        && payload.get(1) == Some(&filesystem_rpc::VERSION)
+    {
+        return filesystem_rpc::decode(payload).map(|frame| frame.request_id);
+    }
     if payload.len() < 5 {
         return None;
     }
@@ -81,6 +86,19 @@ impl std::fmt::Display for ControllerRpcError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unified_correlation_validates_whole_frame_without_named_fallback() {
+        use filesystem_rpc::{Frame, Operation, State, Error};
+        let mut bytes = [0; filesystem_rpc::HEADER];
+        let frame = Frame { operation: Operation::UploadCommit, state: State::Request,
+            request_id: 0xab42, error: Error::None, nonce: 9, operation_id: 0,
+            delay_ms: 10000, body: &[], replayed: false };
+        filesystem_rpc::encode(frame, &mut bytes).unwrap();
+        assert_eq!(super::protocol_frame_request_id(&bytes), Some(0xab42));
+        for size in 0..bytes.len() { assert_eq!(super::protocol_frame_request_id(&bytes[..size]), None); }
+        bytes[20] = 1;
+        assert_eq!(super::protocol_frame_request_id(&bytes), None);
+    }
     use super::{protocol_frame_request_id, protocol_response_id_matches};
 
     #[test]

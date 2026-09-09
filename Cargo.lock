@@ -481,6 +481,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "filesystem-rpc"
+version = "0.0.0"
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -996,6 +1000,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "filesystem-rpc",
  "fs2",
  "futures-util",
  "libc",
