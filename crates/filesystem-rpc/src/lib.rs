@@ -1,7 +1,7 @@
 //! Borrowed, bounded filesystem wire contract. No transport or operation state.
 pub const REQUEST: u8 = 0xfc;
 pub const RESPONSE: u8 = 0xfd;
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 pub const HEADER: usize = 24;
 pub const MAX_BODY: usize = 32_512;
 pub const MAX_DEADLINE_MS: u32 = 10_000;

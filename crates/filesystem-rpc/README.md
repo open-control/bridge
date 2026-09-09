@@ -6,7 +6,7 @@ not translate requests into the previous named filesystem/job frames.
 
 The application and Manager UI still use the previous protocol. This isolated
 prototype is not a released compatibility promise. Operation bodies beyond the
-R2 subset below are reserved for the coordinated migration.
+implemented subset below are reserved for the coordinated migration.
 
 ## Envelope
 
@@ -16,7 +16,7 @@ padding or trailing bytes are accepted. Maximum body length is 32,512 bytes.
 | Offset | Type | Meaning |
 | --- | --- | --- |
 | 0 | u8 | `0xfc` request, `0xfd` response |
-| 1 | u8 | Version, exactly `2` |
+| 1 | u8 | Version, exactly `3` |
 | 2 | u8 | Operation, 0 through 14 |
 | 3 | u8 | State in bits 0–6; bit 7 marks a retained mutation replay |
 | 4 | u16 | Nonzero transport request ID, echoed in the response |
@@ -50,16 +50,16 @@ NUL. Core validates traversal and its reserved persistence paths before upload
 mutation. Sizes and offsets below are byte counts. All bodies must be consumed
 exactly; successful responses are empty unless specified otherwise.
 
-| ID | Operation | R2 request | Complete response |
+| ID | Operation | Request | Complete response |
 | --- | --- | --- | --- |
 | 0 | Capabilities | Empty | u32 supported mask, u32 max chunk, u32 max upload, u32 retention ms, u16 max path, u8 inflight capacity, u8 retained capacity |
 | 1 | Stat | Path | u8 filesystem entry type, u32 size |
 | 2 | List | Reserved | Unsupported |
 | 3 | Read | Path, u32 offset, u16 count | Up to count raw bytes |
-| 4 | UploadBegin | Nonzero u16 session, u32 expected size, path | Empty |
-| 5 | UploadChunk | u16 session, u32 offset, u16 count, raw bytes | u32 accumulated size |
-| 6 | UploadCommit | u16 session | Empty, after cooperative commit |
-| 7 | UploadAbort | u16 session | Empty |
+| 4 | UploadBegin | u32 expected size, path | Nonzero u32 upload identity, assigned by Core |
+| 5 | UploadChunk | u32 upload identity, u32 offset, u16 count, raw bytes | u32 accumulated size |
+| 6 | UploadCommit | u32 upload identity | Empty, after cooperative commit |
+| 7 | UploadAbort | u32 upload identity | Empty |
 | 8 | Mkdir | Reserved | Unsupported |
 | 9 | Delete | Reserved | Unsupported |
 | 10 | Rename | Reserved | Unsupported |
@@ -70,14 +70,26 @@ exactly; successful responses are empty unless specified otherwise.
 
 IDs 6 and 8–12 are retained mutations. R2 advertises mask `0x60fb`, a
 30,720-byte chunk limit, 524,288-byte upload limit and 30,000-ms result window.
-One upload may be staged. R2 retains exactly **one commit per service lifetime**;
-after admission, another UploadBegin is refused even after result expiration.
-Normal repeated use and retained-record reclamation belong to R3.
+One upload may be staged. A fixed registry retains **32 operation results**.
+A terminal record expires at 30,000 ms; a pending operation is never reaped by
+this timer. Saturation refuses Begin before opening a write session and never
+evicts an unexpired result. Reclaimed slots allow further uploads.
+
+Version 3 intentionally rejects the unpublished R2 version 2 envelope because
+upload bodies now use Core-assigned u32 identities rather than client-chosen
+u16 sessions. Negotiate capabilities before mutation; do not silently downgrade.
+The upload identity is the coordinator's nonzero, non-wrapping job ID. It is
+also the commit's operation ID and cannot address a later upload during that
+coordinator's lifetime, including after result reclamation. A second nonce
+cannot replace an already pending commit.
 
 Chunks must be sequential. A duplicate or incorrect offset is rejected without
-appending. The R2 Manager does not automatically replay chunks; after a staging
-failure it attempts Abort. Abandoned staging expires after 10,000 ms from Begin
-on a foreground persistence turn, including when no further request arrives.
+appending. The Manager does not automatically replay chunks; after a staging
+failure with a known upload identity it attempts Abort. If Begin's response is
+lost, the client does not guess an identity to abort. Core expires the abandoned
+staging after 10,000 ms from Begin on a foreground persistence turn, including
+when no further request arrives. A deferred autosave reaching the existing
+2,000-ms deferral limit also releases an idle staging upload.
 Playing postpones storage work and cleanup; short I/O is refused BusyPlaying.
 
 The Core caller must open a persistence coordinator turn before `process` or
@@ -85,6 +97,10 @@ The Core caller must open a persistence coordinator turn before `process` or
 commit journal and recovery rules. Cancel/deadline cleanup is allowed only
 before the irreversible point. A cancellation after that point returns
 CancelTooLate. Cleanup failure is reported and requires storage recovery.
+A short append or failed cooperative step schedules cleanup on a separate
+measured promotion turn, so it cannot spend cleanup I/O inside a read/chunk quota.
+Retained results carry the media generation; a query against another generation
+returns MediaChanged. This does not prove recovery after power loss.
 
 ## Loss, retry and identity
 
@@ -92,11 +108,11 @@ A repeated Commit with the same nonce, session and deadline returns the known
 operation with `replayed=true`, without starting another commit. Changed
 parameters for that nonce yield Conflict. Poll identifies the operation by
 nonce and Core ID. After the terminal retention window it returns ResultExpired.
-No result survives a Core restart; this is not an unbounded exactly-once claim.
+No result survives a Core restart; identity uniqueness here is scoped to the coordinator lifetime, not across reboot. This is not an unbounded exactly-once claim.
 
 A transport retry uses a **fresh request ID**, retaining the mutation nonce and
 parameters. Reusing the timed-out request ID can route a reply to the previous
-Bridge waiter. The R2 client retries one lost Commit/Poll exchange and rejects
+Bridge waiter. The client retries one lost Commit/Poll exchange and rejects
 a replay response on a fresh mutation attempt as a nonce collision. Exhausted
 commit retries report an ambiguous outcome; they do not assert that nothing
 was written. Reconnection, ID reuse over long sessions and reboot reconciliation

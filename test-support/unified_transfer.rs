@@ -95,6 +95,7 @@ async fn run_transfer(lose_terminal: bool) {
     let controller_task = tokio::spawn(async move {
         let mut dropped = false;
         let mut chunks = 0;
+        let mut upload_ids = Vec::new();
         let mut replay = false;
         while let Some(bytes) = request_rx.recv().await {
             let request = filesystem_rpc::decode(&bytes).unwrap();
@@ -112,6 +113,11 @@ async fn run_transfer(lose_terminal: bool) {
             let mut response = vec![0; size];
             output.read_exact(&mut response).await.unwrap();
             let decoded = filesystem_rpc::decode(&response).unwrap();
+            if request.operation == Operation::UploadBegin && decoded.state == State::Complete {
+                let id = u32::from_le_bytes(decoded.body.try_into().unwrap());
+                assert!(!upload_ids.contains(&id));
+                upload_ids.push(id);
+            }
             eprintln!(
                 "RPC {:?} request={} => {:?} operation={} replay={}",
                 request.operation,
@@ -140,7 +146,8 @@ async fn run_transfer(lose_terminal: bool) {
         }
         assert!(dropped);
         assert_eq!(replay, !lose_terminal);
-        assert_eq!(chunks, 2);
+        assert_eq!(chunks, 4);
+        assert_eq!(upload_ids.len(), 5);
         input.shutdown().await.unwrap();
         (dropped, replay, chunks)
     });
@@ -149,7 +156,7 @@ async fn run_transfer(lose_terminal: bool) {
     let data: Vec<u8> = (0..30_725).map(|i| (i % 251) as u8).collect();
     tokio::time::timeout(
         Duration::from_secs(20),
-        client.upload("projects/unified.bin", &data, 77, 0x10203040),
+        client.upload("projects/unified.bin", &data, 0x10203040),
     )
     .await
     .unwrap()
@@ -165,6 +172,58 @@ async fn run_transfer(lose_terminal: bool) {
             .unwrap(),
     );
     assert_eq!(read, data);
+    // Reuse the same service after a terminal result, overwrite a real file,
+    // then commit an empty file. Retained results cannot pin the upload slot.
+    let second: Vec<u8> = data.iter().map(|byte| byte ^ 0xa5).collect();
+    client
+        .upload("projects/unified.bin", &second, 0x10203041)
+        .await
+        .unwrap();
+    let mut reread = client
+        .read("projects/unified.bin", 0, 30_720)
+        .await
+        .unwrap();
+    reread.extend_from_slice(
+        &client
+            .read("projects/unified.bin", 30_720, 5)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(reread, second);
+    client
+        .upload("projects/empty.bin", &[], 0x10203042)
+        .await
+        .unwrap();
+    assert!(client
+        .read("projects/empty.bin", 0, 1)
+        .await
+        .unwrap()
+        .is_empty());
+    // A reused nonce must reject the new commit and release its staging lease.
+    // The following upload must succeed immediately, without Core's idle expiry.
+    assert!(matches!(
+        client
+            .upload("projects/rejected.bin", &[], 0x10203040)
+            .await,
+        Err(controller_fs_unified::Failure::Remote(
+            filesystem_rpc::Error::Conflict
+        ))
+    ));
+    assert!(matches!(
+        client.read("projects/rejected.bin", 0, 1).await,
+        Err(controller_fs_unified::Failure::Remote(
+            filesystem_rpc::Error::NotFound
+        ))
+    ));
+    client
+        .upload("projects/after-rejection.bin", &[], 0x10203043)
+        .await
+        .unwrap();
+    assert!(client
+        .read("projects/after-rejection.bin", 0, 1)
+        .await
+        .unwrap()
+        .is_empty());
     // FIFO barrier: both duplicated read replies have crossed the relay before checking the host.
     client.capabilities().await.unwrap();
     assert!(
@@ -183,7 +242,7 @@ async fn run_transfer(lose_terminal: bool) {
     server_task.await.unwrap().unwrap();
     assert!(child.wait().await.unwrap().success());
     eprintln!(
-        "E2E: 30725 bytes, {} chunks, lost {}={}, retained replay={}, exact readback, no host leak",
+        "E2E: 2 x 30725 bytes + 2 empty files, 4 uploads + 1 rejected nonce with cleanup, {} chunks, lost {}={}, retained replay={}, exact readback, no host leak",
         counts.2,
         if lose_terminal {
             "terminal"
