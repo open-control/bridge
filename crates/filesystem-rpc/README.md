@@ -1,4 +1,4 @@
-# Filesystem wire contract v2 — R2 prototype
+# Filesystem wire contract v3 — R3b read and listing slice
 
 This unpublished, dependency-free crate owns only the borrowed wire envelope.
 Core implements the same contract in `UnifiedFileSystemRpc.{hpp,cpp}`. It does
@@ -54,7 +54,7 @@ exactly; successful responses are empty unless specified otherwise.
 | --- | --- | --- | --- |
 | 0 | Capabilities | Empty | u32 supported mask, u32 max chunk, u32 max upload, u32 retention ms, u16 max path, u8 inflight capacity, u8 retained capacity |
 | 1 | Stat | Path | u8 filesystem entry type, u32 size |
-| 2 | List | Reserved | Unsupported |
+| 2 | List | Path, u16 start index, u8 limit (1–8), u32 snapshot ID | u32 snapshot ID, u16 start index, u8 count, u8 has more (0/1), then entries |
 | 3 | Read | Path, u32 offset, u16 count | Up to count raw bytes |
 | 4 | UploadBegin | u32 expected size, path | Nonzero u32 upload identity, assigned by Core |
 | 5 | UploadChunk | u32 upload identity, u32 offset, u16 count, raw bytes | u32 accumulated size |
@@ -68,12 +68,32 @@ exactly; successful responses are empty unless specified otherwise.
 | 13 | Poll | Empty | Retained operation result |
 | 14 | Cancel | Empty | Cancelled, existing terminal result, or typed refusal |
 
-IDs 6 and 8–12 are retained mutations. R2 advertises mask `0x60fb`, a
+IDs 6 and 8–12 are retained mutations. R3b advertises mask `0x60ff`, a
 30,720-byte chunk limit, 524,288-byte upload limit and 30,000-ms result window.
 One upload may be staged. A fixed registry retains **32 operation results**.
 A terminal record expires at 30,000 ms; a pending operation is never reaped by
 this timer. Saturation refuses Begin before opening a write session and never
 evicts an unexpired result. Reclaimed slots allow further uploads.
+
+Each List entry is a u8 name length, name bytes (1–63 bytes), u8 type
+(Missing=0, File=1, Directory=2, Other=3), u32 size and u8 name-truncated
+flag (0/1). A first page uses start=0 and snapshot=0. The response supplies
+the shared catalog's nonzero snapshot ID; subsequent pages must echo it.
+An unavailable/replaced snapshot or changed storage identity returns Conflict,
+requiring a fresh listing. The catalog increments its ID before every scan,
+including a failed scan, and refuses to wrap at u32 exhaustion. IDs are scoped
+to the catalog lifetime, not reboot. A snapshot contains at most 256 entries;
+overflow is an error, not a silently truncated directory. Pagination reads the
+existing shared snapshot with no second catalog allocation or per-page scan.
+An intervening use of another directory may invalidate continuation.
+
+Manager validates page identity, index, count, progress, types, flags, names and
+exact body consumption. It returns the complete bounded list or an error; it
+does not return partial pages on a conflict. Its read-batch API preserves the
+existing maximum of eight simultaneous reads (245,760 requested bytes), checks
+offset overflow and every exact response length, and returns buffers in request
+order. The caller must stream successive batches and handle file changes; this
+API does not promise a multi-request read snapshot or a firmware throughput gain.
 
 Version 3 intentionally rejects the unpublished R2 version 2 envelope because
 upload bodies now use Core-assigned u32 identities rather than client-chosen
@@ -129,5 +149,8 @@ In the full ms-dev-env workspace, build Core's `test_UnifiedFileTransfer`, set
 `MS_CORE_RPC_PROBE` to that executable and run Bridge tests with
 `cargo test --features unified-rpc-e2e`. This opt-in feature compiles the real
 Manager source, uses the Bridge TCP control server/session and starts the native
-Core service. Pipes and a logical clock replace serial hardware and wall time;
-test duration is not a throughput or MCU CPU measurement.
+Core service. Pipes and a logical clock replace serial hardware and wall time.
+The native server performs eight admitted foreground turns before each exchange;
+it does not make commit progress depend on one step per Manager poll. This
+bounded schedule is not a firmware timing model, and test duration is not a
+throughput or MCU CPU measurement.

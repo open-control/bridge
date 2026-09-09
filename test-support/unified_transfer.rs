@@ -96,12 +96,21 @@ async fn run_transfer(lose_terminal: bool) {
         let mut dropped = false;
         let mut chunks = 0;
         let mut upload_ids = Vec::new();
+        let mut read_pair: Option<Vec<Vec<u8>>> = None;
+        let mut reordered = 0;
+        let mut pages = 0;
         let mut replay = false;
         while let Some(bytes) = request_rx.recv().await {
             let request = filesystem_rpc::decode(&bytes).unwrap();
             assert_eq!(request.state, State::Request);
             if request.operation == Operation::UploadChunk {
                 chunks += 1;
+            }
+            if request.operation == Operation::List {
+                pages += 1;
+            }
+            if request.operation == Operation::Stat {
+                read_pair = Some(Vec::new());
             }
             input
                 .write_all(&(bytes.len() as u32).to_le_bytes())
@@ -137,6 +146,23 @@ async fn run_transfer(lose_terminal: bool) {
             }
             replay |= decoded.replayed;
             if request.operation == Operation::Read {
+                if let Some(pair) = read_pair.as_mut() {
+                    pair.push(response);
+                    if pair.len() == 8 {
+                        for bytes in pair.drain(..).rev() {
+                            controller_tx
+                                .send(Bytes::from(bytes.clone()))
+                                .await
+                                .unwrap();
+                            controller_tx.send(Bytes::from(bytes)).await.unwrap();
+                        }
+                        read_pair = None;
+                        reordered += 1;
+                    }
+                    continue;
+                }
+            }
+            if request.operation == Operation::Read {
                 controller_tx
                     .send(Bytes::from(response.clone()))
                     .await
@@ -146,14 +172,16 @@ async fn run_transfer(lose_terminal: bool) {
         }
         assert!(dropped);
         assert_eq!(replay, !lose_terminal);
-        assert_eq!(chunks, 4);
-        assert_eq!(upload_ids.len(), 5);
+        assert_eq!(chunks, 18);
+        assert_eq!(upload_ids.len(), 14);
+        assert_eq!(reordered, 1);
+        assert_eq!(pages, 2);
         input.shutdown().await.unwrap();
         (dropped, replay, chunks)
     });
     let mut client =
         controller_fs_unified::Client::new(controller_fs::BridgeBinaryClient::new(port));
-    let data: Vec<u8> = (0..30_725).map(|i| (i % 251) as u8).collect();
+    let data: Vec<u8> = (0..245_765).map(|i| (i % 251) as u8).collect();
     tokio::time::timeout(
         Duration::from_secs(20),
         client.upload("projects/unified.bin", &data, 0x10203040),
@@ -161,16 +189,19 @@ async fn run_transfer(lose_terminal: bool) {
     .await
     .unwrap()
     .unwrap();
-    let mut read = client
-        .read("projects/unified.bin", 0, 30_720)
-        .await
-        .unwrap();
-    read.extend_from_slice(
-        &client
-            .read("projects/unified.bin", 30_720, 5)
-            .await
-            .unwrap(),
-    );
+    let mut read = Vec::new();
+    for offset in (0..data.len()).step_by(30_720) {
+        read.extend(
+            client
+                .read(
+                    "projects/unified.bin",
+                    offset as u32,
+                    (data.len() - offset).min(30_720) as u16,
+                )
+                .await
+                .unwrap(),
+        );
+    }
     assert_eq!(read, data);
     // Reuse the same service after a terminal result, overwrite a real file,
     // then commit an empty file. Retained results cannot pin the upload slot.
@@ -179,16 +210,19 @@ async fn run_transfer(lose_terminal: bool) {
         .upload("projects/unified.bin", &second, 0x10203041)
         .await
         .unwrap();
-    let mut reread = client
-        .read("projects/unified.bin", 0, 30_720)
-        .await
-        .unwrap();
-    reread.extend_from_slice(
-        &client
-            .read("projects/unified.bin", 30_720, 5)
-            .await
-            .unwrap(),
-    );
+    let mut reread = Vec::new();
+    for offset in (0..second.len()).step_by(30_720) {
+        reread.extend(
+            client
+                .read(
+                    "projects/unified.bin",
+                    offset as u32,
+                    (second.len() - offset).min(30_720) as u16,
+                )
+                .await
+                .unwrap(),
+        );
+    }
     assert_eq!(reread, second);
     client
         .upload("projects/empty.bin", &[], 0x10203042)
@@ -224,6 +258,50 @@ async fn run_transfer(lose_terminal: bool) {
         .await
         .unwrap()
         .is_empty());
+    for i in 0..9 {
+        client
+            .upload(&format!("projects/list-{i}.bin"), &[], 0x20000000 + i)
+            .await
+            .unwrap();
+    }
+    let entries = client.list("projects").await.unwrap();
+    assert_eq!(entries.len(), 12);
+    let mut names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), entries.len());
+    assert!(entries.iter().all(|e| e.file_type == 1 && !e.truncated));
+    assert_eq!(
+        entries
+            .iter()
+            .find(|e| e.name == "unified.bin")
+            .unwrap()
+            .size,
+        245_765
+    );
+    assert_eq!(
+        client.stat("projects/unified.bin").await.unwrap(),
+        (1, 245_765)
+    );
+    // The relay withholds replies until all eight reads arrive, then reverses them.
+    let batches = client
+        .read_batch("projects/unified.bin", 0, 245_760)
+        .await
+        .unwrap();
+    assert_eq!(batches.len(), 8);
+    let mut pipelined = batches.concat();
+    pipelined.extend(
+        client
+            .read_batch("projects/unified.bin", 245_760, 5)
+            .await
+            .unwrap()
+            .concat(),
+    );
+    assert_eq!(pipelined, second);
+    assert!(matches!(
+        client.read_batch("projects/unified.bin", 245_760, 6).await,
+        Err(controller_fs_unified::Failure::Protocol)
+    ));
     // FIFO barrier: both duplicated read replies have crossed the relay before checking the host.
     client.capabilities().await.unwrap();
     assert!(
@@ -242,7 +320,7 @@ async fn run_transfer(lose_terminal: bool) {
     server_task.await.unwrap().unwrap();
     assert!(child.wait().await.unwrap().success());
     eprintln!(
-        "E2E: 2 x 30725 bytes + 2 empty files, 4 uploads + 1 rejected nonce with cleanup, {} chunks, lost {}={}, retained replay={}, exact readback, no host leak",
+        "E2E: 13 uploads (2 x 245765 bytes) + 1 rejected nonce with cleanup, {} chunks, lost {}={}, retained replay={}, 12 entries/2 pages, 8 reversed pipelined replies, short-read rejection, exact readback, no host leak",
         counts.2,
         if lose_terminal {
             "terminal"
