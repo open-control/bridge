@@ -11,7 +11,12 @@ repository = "https://github.com/miu-lab/open-control"
 name = "oc-bridge"
 path = "src/main.rs"
 
+[features]
+unified-rpc-e2e = []
+
 [dependencies]
+filesystem-rpc = { path = "crates/filesystem-rpc" }
+getrandom = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "signal"] }
 socket2 = "0.5"
 serialport = "4"
@@ -45,6 +50,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["fs", "process", "io-util"] }
 proptest = "1"
 
 [profile.release]

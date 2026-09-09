@@ -13,6 +13,11 @@
 /// The payload format is: [MessageID, name_len, name_bytes..., fields...]
 /// We skip the first byte (MessageID) to get to the name.
 pub fn parse_message_name(payload: &[u8]) -> Option<String> {
+    match payload.first().copied() {
+        Some(filesystem_rpc::REQUEST) => return Some("FilesystemRequest".into()),
+        Some(filesystem_rpc::RESPONSE) => return Some("FilesystemResponse".into()),
+        _ => {}
+    }
     // Skip MessageID (1 byte)
     const HEADER_SIZE: usize = 1;
 
