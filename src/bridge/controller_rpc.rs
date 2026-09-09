@@ -5,6 +5,10 @@
 //! bridge while allowing local tools to issue bounded request/response probes.
 
 use bytes::Bytes;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    OnceLock,
+};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -12,12 +16,40 @@ use tokio::sync::oneshot;
 pub struct ControllerRpcRequest {
     pub payload: Bytes,
     pub expected_response_id: Option<u8>,
-    pub expected_request_id: Option<u16>,
+    pub expected_request_id: Option<u64>,
     pub timeout: Duration,
     pub response_tx: oneshot::Sender<ControllerRpcResult>,
 }
 
 pub type ControllerRpcResult = std::result::Result<Bytes, ControllerRpcError>;
+
+// Shared across serial reconnects and all local clients. Randomize the starting
+// point once per process; fail closed on unavailable entropy or exhaustion.
+pub(super) fn next_exchange_id() -> Option<u64> {
+    static SEQUENCE: OnceLock<Option<AtomicU64>> = OnceLock::new();
+    let sequence = SEQUENCE
+        .get_or_init(|| {
+            let mut seed = [0; 8];
+            getrandom::fill(&mut seed).ok()?;
+            Some(AtomicU64::new(u64::from_le_bytes(seed).max(1)))
+        })
+        .as_ref()?;
+    reserve_exchange_id(sequence)
+}
+
+fn reserve_exchange_id(sequence: &AtomicU64) -> Option<u64> {
+    sequence
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .ok()
+}
+
+pub(super) fn with_exchange_id(payload: Bytes, id: u64) -> Bytes {
+    let mut bytes = payload
+        .try_into_mut()
+        .unwrap_or_else(|bytes| bytes::BytesMut::from(bytes.as_ref()));
+    bytes[24..32].copy_from_slice(&id.to_le_bytes());
+    bytes.freeze()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerRpcError {
@@ -28,7 +60,7 @@ pub enum ControllerRpcError {
     InvalidRequest,
 }
 
-pub fn protocol_frame_request_id(payload: &[u8]) -> Option<u16> {
+pub fn protocol_frame_request_id(payload: &[u8]) -> Option<u64> {
     if matches!(
         payload.first(),
         Some(&filesystem_rpc::REQUEST) | Some(&filesystem_rpc::RESPONSE)
@@ -45,10 +77,7 @@ pub fn protocol_frame_request_id(payload: &[u8]) -> Option<u16> {
         return None;
     }
 
-    Some(u16::from_le_bytes([
-        payload[request_id_offset],
-        payload[request_id_offset + 1],
-    ]))
+    Some(u16::from_le_bytes([payload[request_id_offset], payload[request_id_offset + 1]]) as u64)
 }
 
 impl std::fmt::Display for ControllerRpcError {
@@ -65,6 +94,13 @@ impl std::fmt::Display for ControllerRpcError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exchange_ids_do_not_wrap_or_reuse_at_exhaustion() {
+        let sequence = super::AtomicU64::new(u64::MAX - 1);
+        assert_eq!(super::reserve_exchange_id(&sequence), Some(u64::MAX - 1));
+        assert_eq!(super::reserve_exchange_id(&sequence), None);
+        assert_eq!(super::reserve_exchange_id(&sequence), None);
+    }
     #[test]
     fn unified_correlation_validates_whole_frame_without_named_fallback() {
         use filesystem_rpc::{Error, Frame, Operation, State};

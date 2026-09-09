@@ -10,7 +10,10 @@
 //! - Transport lifecycle (that's the caller's responsibility)
 //! - Reconnection logic (handled by the bridge main loop)
 
-use super::controller_rpc::{protocol_frame_request_id, ControllerRpcError, ControllerRpcRequest};
+use super::controller_rpc::{
+    next_exchange_id, protocol_frame_request_id, with_exchange_id, ControllerRpcError,
+    ControllerRpcRequest,
+};
 use super::guard::{GuardAction, RelayGuard};
 
 #[cfg(all(test, feature = "unified-rpc-e2e"))]
@@ -80,9 +83,17 @@ const MAX_PENDING_CONTROLLER_RPCS: usize = 8;
 
 struct PendingControllerRpc {
     expected_response_id: Option<u8>,
-    expected_request_id: Option<u16>,
+    expected_request_id: Option<u64>,
+    filesystem: Option<FilesystemCorrelation>,
     deadline: Instant,
     response_tx: oneshot::Sender<std::result::Result<Bytes, ControllerRpcError>>,
+}
+
+struct FilesystemCorrelation {
+    client_id: u64,
+    operation: filesystem_rpc::Operation,
+    nonce: u32,
+    operation_id: u32,
 }
 
 impl<C: Codec> BridgeSession<C> {
@@ -187,7 +198,7 @@ impl<C: Codec> BridgeSession<C> {
 
         for frame in frames {
             match frame {
-                Frame::Message { name, payload } => {
+                Frame::Message { name, mut payload } => {
                     // Update stats (bytes received from controller)
                     self.stats.add_rx(payload.len());
 
@@ -196,7 +207,7 @@ impl<C: Codec> BridgeSession<C> {
                         let _ = tx.try_send(LogEntry::protocol_in(&name, payload.len()));
                     }
 
-                    if self.complete_pending_controller_rpc(&payload) {
+                    if self.complete_pending_controller_rpc(&mut payload) {
                         continue;
                     }
 
@@ -230,6 +241,13 @@ impl<C: Codec> BridgeSession<C> {
     ///
     /// Parses message name for logging, updates stats, encodes and sends to controller.
     fn relay_host_to_controller(&mut self, data: Bytes) {
+        // Filesystem RPC belongs to the correlated local control channel.
+        if matches!(
+            data.first(),
+            Some(&filesystem_rpc::REQUEST) | Some(&filesystem_rpc::RESPONSE)
+        ) {
+            return;
+        }
         let now_ms = self.elapsed_ms();
 
         // Parse message name from raw payload for logging
@@ -255,22 +273,37 @@ impl<C: Codec> BridgeSession<C> {
         }
     }
 
-    fn handle_controller_rpc_request(&mut self, request: ControllerRpcRequest) {
+    fn handle_controller_rpc_request(&mut self, mut request: ControllerRpcRequest) {
+        let mut filesystem = None;
         if matches!(
             request.payload.first(),
             Some(&filesystem_rpc::REQUEST) | Some(&filesystem_rpc::RESPONSE)
         ) {
-            let valid = filesystem_rpc::decode(&request.payload).is_some_and(|frame| {
+            let frame = filesystem_rpc::decode(&request.payload).filter(|frame| {
                 frame.state == filesystem_rpc::State::Request
                     && request.expected_response_id == Some(filesystem_rpc::RESPONSE)
                     && request.expected_request_id == Some(frame.request_id)
             });
-            if !valid {
+            let Some(frame) = frame else {
                 let _ = request
                     .response_tx
                     .send(Err(ControllerRpcError::InvalidRequest));
                 return;
-            }
+            };
+            filesystem = Some(FilesystemCorrelation {
+                client_id: frame.request_id,
+                operation: frame.operation,
+                nonce: frame.nonce,
+                operation_id: frame.operation_id,
+            });
+            let Some(exchange_id) = next_exchange_id() else {
+                let _ = request
+                    .response_tx
+                    .send(Err(ControllerRpcError::SendFailed));
+                return;
+            };
+            request.expected_request_id = Some(exchange_id);
+            request.payload = with_exchange_id(request.payload, exchange_id);
         }
         self.expire_pending_controller_rpc();
         if self.pending_controller_rpcs.len() >= MAX_PENDING_CONTROLLER_RPCS {
@@ -288,6 +321,7 @@ impl<C: Codec> BridgeSession<C> {
         let pending = PendingControllerRpc {
             expected_response_id: request.expected_response_id,
             expected_request_id: request.expected_request_id,
+            filesystem,
             deadline: Instant::now() + request.timeout,
             response_tx: request.response_tx,
         };
@@ -301,7 +335,8 @@ impl<C: Codec> BridgeSession<C> {
         }
     }
 
-    fn complete_pending_controller_rpc(&mut self, payload: &Bytes) -> bool {
+    fn complete_pending_controller_rpc(&mut self, payload: &mut Bytes) -> bool {
+        self.expire_pending_controller_rpc();
         if self.pending_controller_rpcs.is_empty() {
             return false;
         }
@@ -317,7 +352,12 @@ impl<C: Codec> BridgeSession<C> {
         let Some(pending) = self.pending_controller_rpcs.remove(index) else {
             return false;
         };
-        let _ = pending.response_tx.send(Ok(payload.clone()));
+        let response = std::mem::take(payload);
+        let response = match pending.filesystem {
+            Some(correlation) => with_exchange_id(response, correlation.client_id),
+            None => response,
+        };
+        let _ = pending.response_tx.send(Ok(response));
         true
     }
 
@@ -327,8 +367,9 @@ impl<C: Codec> BridgeSession<C> {
         }
 
         let now = Instant::now();
-        let mut pending = std::mem::take(&mut self.pending_controller_rpcs);
-        while let Some(item) = pending.pop_front() {
+        // Rotate in place: periodic expiration must not reallocate the queue.
+        for _ in 0..self.pending_controller_rpcs.len() {
+            let item = self.pending_controller_rpcs.pop_front().unwrap();
             if now >= item.deadline {
                 let _ = item.response_tx.send(Err(ControllerRpcError::Timeout));
             } else {
@@ -358,6 +399,15 @@ impl<C: Codec> BridgeSession<C> {
 
 impl PendingControllerRpc {
     fn matches_payload(&self, payload: &Bytes) -> bool {
+        if let Some(expected) = &self.filesystem {
+            return filesystem_rpc::decode(payload).is_some_and(|frame| {
+                frame.state != filesystem_rpc::State::Request
+                    && Some(frame.request_id) == self.expected_request_id
+                    && frame.operation == expected.operation
+                    && frame.nonce == expected.nonce
+                    && (expected.operation_id == 0 || frame.operation_id == expected.operation_id)
+            });
+        }
         let first_byte = payload.first().copied();
         // Reserved filesystem frames require an explicit, valid waiter. A
         // wildcard for another RPC family must not consume malformed/late data.
@@ -391,7 +441,7 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::oneshot;
 
-    fn filesystem_frame(request_id: u16, response: bool) -> Bytes {
+    fn filesystem_frame(request_id: u64, response: bool) -> Bytes {
         use filesystem_rpc::{Error, Frame, Operation, State};
         let mut bytes = vec![0; filesystem_rpc::HEADER];
         filesystem_rpc::encode(
@@ -416,10 +466,200 @@ mod tests {
         Bytes::from(bytes)
     }
 
+    struct RpcHarness {
+        session: BridgeSession<RawCodec>,
+        controller: mpsc::Receiver<Bytes>,
+        host: mpsc::Receiver<Bytes>,
+    }
+    impl RpcHarness {
+        fn new() -> Self {
+            let (_, input) = mpsc::channel(16);
+            let (output, controller) = mpsc::channel(16);
+            let (_, host_input) = mpsc::channel(16);
+            let (host_output, host) = mpsc::channel(16);
+            Self {
+                session: BridgeSession::new(
+                    TransportChannels {
+                        rx: input,
+                        tx: output,
+                    },
+                    TransportChannels {
+                        rx: host_input,
+                        tx: host_output,
+                    },
+                    RawCodec,
+                    Arc::new(Stats::new()),
+                    None,
+                ),
+                controller,
+                host,
+            }
+        }
+        fn request(
+            &mut self,
+            id: u64,
+        ) -> (
+            u64,
+            oneshot::Receiver<std::result::Result<Bytes, ControllerRpcError>>,
+        ) {
+            let (response_tx, response_rx) = oneshot::channel();
+            self.session
+                .handle_controller_rpc_request(ControllerRpcRequest {
+                    payload: filesystem_frame(id, false),
+                    expected_response_id: Some(filesystem_rpc::RESPONSE),
+                    expected_request_id: Some(id),
+                    timeout: Duration::from_secs(5),
+                    response_tx,
+                });
+            let bytes = self.controller.try_recv().unwrap();
+            (
+                filesystem_rpc::decode(&bytes).unwrap().request_id,
+                response_rx,
+            )
+        }
+        fn reply(&mut self, id: u64, marker: u8) {
+            let bytes = filesystem_frame(id, true);
+            let mut frame = filesystem_rpc::decode(&bytes).unwrap();
+            let body = [marker];
+            frame.body = &body;
+            let mut reply = vec![0; filesystem_rpc::HEADER + 1];
+            filesystem_rpc::encode(frame, &mut reply).unwrap();
+            self.session.relay_controller_to_host(Bytes::from(reply));
+        }
+    }
+
+    #[test]
+    fn identical_client_ids_are_isolated_with_reordered_and_duplicated_replies() {
+        let mut harness = RpcHarness::new();
+        let (a, mut first) = harness.request(0x1234_5678_1234_5678);
+        let (b, mut second) = harness.request(0x1234_5678_1234_5678);
+        assert_ne!(a, b);
+        harness.reply(b, 22);
+        harness.reply(b, 22); // Late duplicate must not finish the first waiter.
+        assert!(matches!(
+            first.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        harness.reply(a, 11);
+        for (receiver, marker) in [(&mut first, 11), (&mut second, 22)] {
+            let bytes = receiver.try_recv().unwrap().unwrap();
+            let frame = filesystem_rpc::decode(&bytes).unwrap();
+            assert_eq!(frame.request_id, 0x1234_5678_1234_5678);
+            assert_eq!(frame.body, &[marker]);
+        }
+        assert!(harness.host.try_recv().is_err());
+    }
+
+    #[test]
+    fn musical_host_cannot_bypass_filesystem_correlation() {
+        let mut harness = RpcHarness::new();
+        harness
+            .session
+            .relay_host_to_controller(filesystem_frame(1, false));
+        harness
+            .session
+            .relay_host_to_controller(filesystem_frame(1, true));
+        assert!(harness.controller.try_recv().is_err());
+        harness
+            .session
+            .relay_host_to_controller(Bytes::from_static(&[0x49, 0]));
+        assert_eq!(harness.controller.try_recv().unwrap().as_ref(), &[0x49, 0]);
+    }
+
+    #[test]
+    fn expiration_and_new_serial_session_do_not_reuse_a_previous_exchange() {
+        let mut old = RpcHarness::new();
+        let (a, mut expired) = old.request(42);
+        old.session.pending_controller_rpcs[0].deadline = Instant::now();
+        old.reply(a, 1); // Must expire here, without waiting for housekeeping.
+        assert_eq!(expired.try_recv(), Ok(Err(ControllerRpcError::Timeout)));
+        let (b, mut current) = old.request(42);
+        assert_ne!(a, b);
+        old.reply(a, 1);
+        assert!(matches!(
+            current.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        old.reply(b, 2);
+        assert!(current.try_recv().unwrap().is_ok());
+        drop(old);
+        let mut next = RpcHarness::new();
+        let (c, mut reconnected) = next.request(42);
+        assert_ne!(c, a);
+        assert_ne!(c, b);
+        next.reply(a, 1);
+        next.reply(b, 2);
+        assert!(matches!(
+            reconnected.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        next.reply(c, 3);
+        assert!(reconnected.try_recv().unwrap().is_ok());
+        assert!(next.host.try_recv().is_err());
+    }
+
+    #[test]
+    fn matching_exchange_still_requires_operation_nonce_and_operation_identity() {
+        use filesystem_rpc::{Error, Frame, Operation, State};
+        let (response_tx, _) = oneshot::channel();
+        let pending = PendingControllerRpc {
+            expected_response_id: Some(filesystem_rpc::RESPONSE),
+            expected_request_id: Some(99),
+            filesystem: Some(FilesystemCorrelation {
+                client_id: 1,
+                operation: Operation::Poll,
+                nonce: 7,
+                operation_id: 8,
+            }),
+            deadline: Instant::now() + Duration::from_secs(1),
+            response_tx,
+        };
+        for (op, nonce, identity, accepted) in [
+            (Operation::Poll, 7, 8, true),
+            (Operation::Cancel, 7, 8, false),
+            (Operation::Poll, 6, 8, false),
+            (Operation::Poll, 7, 9, false),
+        ] {
+            let mut bytes = vec![0; filesystem_rpc::HEADER];
+            filesystem_rpc::encode(
+                Frame {
+                    operation: op,
+                    state: State::Complete,
+                    request_id: 99,
+                    error: Error::None,
+                    nonce,
+                    operation_id: identity,
+                    delay_ms: 0,
+                    body: &[],
+                    replayed: false,
+                },
+                &mut bytes,
+            )
+            .unwrap();
+            assert_eq!(pending.matches_payload(&Bytes::from(bytes)), accepted);
+        }
+    }
+
+    #[test]
+    fn correlation_rewrites_reuse_owned_buffers_and_preserve_shared_input() {
+        let bytes = filesystem_frame(42, false);
+        let pointer = bytes.as_ptr();
+        let rewritten = with_exchange_id(bytes, u64::MAX - 1);
+        assert_eq!(rewritten.as_ptr(), pointer);
+        let shared = rewritten.clone();
+        let independent = with_exchange_id(rewritten, 17);
+        assert_eq!(
+            filesystem_rpc::decode(&shared).unwrap().request_id,
+            u64::MAX - 1
+        );
+        assert_eq!(filesystem_rpc::decode(&independent).unwrap().request_id, 17);
+    }
+
     #[test]
     fn filesystem_response_cannot_capture_a_wildcard_waiter() {
         let (response_tx, _) = oneshot::channel();
         let pending = PendingControllerRpc {
+            filesystem: None,
             expected_response_id: None,
             expected_request_id: None,
             deadline: Instant::now() + Duration::from_secs(1),
@@ -496,6 +736,7 @@ mod tests {
         session
             .pending_controller_rpcs
             .push_back(PendingControllerRpc {
+                filesystem: None,
                 expected_response_id: Some(0xD1),
                 expected_request_id: None,
                 deadline: Instant::now() + Duration::from_millis(50),
@@ -845,12 +1086,12 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            ctrl_out_rx.recv().await.unwrap(),
-            filesystem_frame(42, false)
-        );
-
-        ctrl_in_tx.send(filesystem_frame(42, true)).await.unwrap();
+        let sent = ctrl_out_rx.recv().await.unwrap();
+        let exchange_id = filesystem_rpc::decode(&sent).unwrap().request_id;
+        ctrl_in_tx
+            .send(filesystem_frame(exchange_id, true))
+            .await
+            .unwrap();
         assert_eq!(
             response_rx.await.unwrap().unwrap(),
             filesystem_frame(42, true)
@@ -883,6 +1124,7 @@ mod tests {
         session
             .pending_controller_rpcs
             .push_back(PendingControllerRpc {
+                filesystem: None,
                 expected_response_id: Some(0xFD),
                 expected_request_id: Some(42),
                 deadline: Instant::now(),

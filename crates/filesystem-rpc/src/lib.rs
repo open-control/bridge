@@ -1,8 +1,8 @@
 //! Borrowed, bounded filesystem wire contract. No transport or operation state.
 pub const REQUEST: u8 = 0xfc;
 pub const RESPONSE: u8 = 0xfd;
-pub const VERSION: u8 = 4;
-pub const HEADER: usize = 24;
+pub const VERSION: u8 = 5;
+pub const HEADER: usize = 32;
 pub const MAX_BODY: usize = 32_512;
 pub const MAX_DEADLINE_MS: u32 = 10_000;
 
@@ -142,7 +142,7 @@ impl State {
 pub struct Frame<'a> {
     pub operation: Operation,
     pub state: State,
-    pub request_id: u16,
+    pub request_id: u64,
     pub error: Error,
     pub nonce: u32,
     pub operation_id: u32,
@@ -235,7 +235,7 @@ impl Frame<'_> {
 }
 
 pub fn decode(data: &[u8]) -> Option<Frame<'_>> {
-    if data.len() < HEADER || data[1] != VERSION {
+    if data.len() < HEADER || data[1] != VERSION || data[6] != 0 || data[7] != 0 {
         return None;
     }
     let state = State::decode(data[3] & 0x7f)?;
@@ -257,8 +257,8 @@ pub fn decode(data: &[u8]) -> Option<Frame<'_>> {
     let frame = Frame {
         operation: Operation::decode(data[2])?,
         state,
-        request_id: u16_at(4),
-        error: Error::decode(u16_at(6))?,
+        request_id: u64::from_le_bytes(data[24..32].try_into().ok()?),
+        error: Error::decode(u16_at(4))?,
         nonce: u32_at(8),
         operation_id: u32_at(12),
         delay_ms: u32_at(16),
@@ -281,8 +281,9 @@ pub fn encode(frame: Frame<'_>, out: &mut [u8]) -> Option<usize> {
     out[1] = VERSION;
     out[2] = frame.operation as u8;
     out[3] = frame.state as u8 | if frame.replayed { 0x80 } else { 0 };
-    out[4..6].copy_from_slice(&frame.request_id.to_le_bytes());
-    out[6..8].copy_from_slice(&(frame.error as u16).to_le_bytes());
+    out[4..6].copy_from_slice(&(frame.error as u16).to_le_bytes());
+    out[6..8].fill(0);
+    out[24..32].copy_from_slice(&frame.request_id.to_le_bytes());
     for (offset, value) in [
         (8, frame.nonce),
         (12, frame.operation_id),

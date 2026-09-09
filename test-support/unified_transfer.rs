@@ -531,6 +531,20 @@ async fn application_flow(port: u16) {
     );
     assert_eq!(writes.len(), 9);
     assert_eq!(writes.last(), Some(&(data.len(), data.len())));
+    // Independent application clients both start with exchange ID 1 on their
+    // TCP connection. Their different results must survive the shared serial link.
+    let mut first = ControllerFsClient::new(BridgeBinaryClient::new(port));
+    let mut second = ControllerFsClient::new(BridgeBinaryClient::new(port));
+    let (existing, missing) = tokio::join!(
+        first.stat("projects/app.bin"),
+        second.stat("projects/absent.bin")
+    );
+    let existing = existing.unwrap();
+    assert_eq!(existing.file_type, FsFileType::File);
+    assert_eq!(existing.size_bytes, data.len() as u32);
+    assert_eq!(missing.unwrap().file_type, FsFileType::Missing);
+    first.close().await;
+    second.close().await;
     assert_eq!(
         client
             .pull_file_to_path_with_progress_limit("projects/app.bin", &oversized, 1024, |_, _| {})

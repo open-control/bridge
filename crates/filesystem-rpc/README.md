@@ -1,30 +1,31 @@
-# Filesystem wire contract v4 — R3d conditional mutations
+# Filesystem wire contract v5 — shared serial correlation
 
 This unpublished, dependency-free crate owns only the borrowed wire envelope.
 Core implements the same contract in `UnifiedFileSystemRpc.{hpp,cpp}`. It does
 not translate requests into the previous named filesystem/job frames.
 
-The application and Manager UI still use the previous protocol. This isolated
-prototype is not a released compatibility promise. Operation bodies beyond the
-implemented subset below are reserved for the coordinated migration.
+The Core application and Manager UI use this protocol on the coordinated
+refactor branches. The previous filesystem/job providers have been removed.
+Firmware qualification and coordinated delivery remain pending.
 
 ## Envelope
 
-All integers are little-endian. A frame is exactly 24 bytes plus its body; no
+All integers are little-endian. A frame is exactly 32 bytes plus its body; no
 padding or trailing bytes are accepted. Maximum body length is 32,512 bytes.
 
 | Offset | Type | Meaning |
 | --- | --- | --- |
 | 0 | u8 | `0xfc` request, `0xfd` response |
-| 1 | u8 | Version, exactly `4` |
+| 1 | u8 | Version, exactly `5` |
 | 2 | u8 | Operation, 0 through 14 |
 | 3 | u8 | State in bits 0–6; bit 7 marks a retained mutation replay |
-| 4 | u16 | Nonzero transport request ID, echoed in the response |
-| 6 | u16 | Typed error, 0 through 20 |
+| 4 | u16 | Typed error, 0 through 20 |
+| 6 | u16 | Reserved, exactly zero |
 | 8 | u32 | Client mutation nonce |
 | 12 | u32 | Core operation ID |
 | 16 | u32 | Requested deadline or pending-response retry interval, milliseconds |
 | 20 | u32 | Exact body length |
+| 24 | u64 | Nonzero transport exchange ID, echoed in the response |
 
 States are Request=0, Complete=1, Pending=2, Failed=3, Cancelled=4.
 Unknown values and inconsistent direction/state combinations are rejected.
@@ -69,7 +70,7 @@ exactly; successful responses are empty unless specified otherwise.
 | 13 | Poll | Empty | Retained operation result |
 | 14 | Cancel | Empty | Cancelled, existing terminal result, or typed refusal |
 
-IDs 6 and 8–12 are retained mutations. R3d advertises mask `0x7fff`, a
+IDs 6 and 8–12 are retained mutations. Core advertises mask `0x7fff`, a
 30,720-byte chunk limit, 524,288-byte upload limit and 30,000-ms result window.
 One upload may be staged. A fixed registry retains **32 operation results**.
 A terminal record expires at 30,000 ms; a pending operation is never reaped by
@@ -96,10 +97,22 @@ offset overflow and every exact response length, and returns buffers in request
 order. The caller must stream successive batches and handle file changes; this
 API does not promise a multi-request read snapshot or a firmware throughput gain.
 
-Version 4 rejects the unpublished version 2/3 prototypes. Version 3 introduced
-Core-assigned upload identities; version 4 permits bounded conditional details
-on failed results and adds StorageFailure=19 and TooLarge=20. Negotiate
+Version 5 rejects all previous prototypes. Version 3 introduced Core-assigned
+upload identities; version 4 added bounded conditional failure details.
+Version 5 widens exchange correlation and reserves two zero bytes. Negotiate
 capabilities before mutation; do not silently downgrade.
+
+The Bridge assigns a process-wide, non-wrapping 64-bit exchange sequence across
+clients and serial reconnects. The OS supplies a random initial value once per
+process; entropy failure or sequence exhaustion prevents transmission. Reuse is
+excluded during the process lifetime; uniqueness across process restarts is
+probabilistic, not a persisted exactly-once promise. The Bridge restores the
+caller's original exchange ID on the matched response and also checks operation,
+mutation nonce and any known Core operation ID. Expiration is checked before
+matching, and orphaned filesystem responses never reach the host musical path.
+Client IDs therefore need not be globally unique. The pending bound stays eight.
+This transport mechanism does not itself protect upload tickets across a Core
+reboot; boot-lifetime qualification is a separate, still-open requirement.
 The upload identity is the coordinator's nonzero, non-wrapping job ID. It is
 also the commit's operation ID and cannot address a later upload during that
 coordinator's lifetime, including after result reclamation. A second nonce
