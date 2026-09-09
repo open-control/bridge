@@ -554,6 +554,7 @@ fn binary_status_from_controller_error(err: ControllerRpcError) -> control_binar
         ControllerRpcError::Timeout => control_binary::Status::Timeout,
         ControllerRpcError::SendFailed => control_binary::Status::SendFailed,
         ControllerRpcError::InvalidRequest => control_binary::Status::ProtocolError,
+        ControllerRpcError::IncompatibleProtocol => control_binary::Status::ProtocolError,
     }
 }
 
@@ -573,6 +574,9 @@ fn controller_rpc_error_message(err: ControllerRpcError) -> String {
         ControllerRpcError::Timeout => "controller rpc timeout".to_string(),
         ControllerRpcError::SendFailed => "controller rpc send failed".to_string(),
         ControllerRpcError::InvalidRequest => "invalid controller rpc request".to_string(),
+        ControllerRpcError::IncompatibleProtocol => {
+            "incompatible controller filesystem protocol".to_string()
+        }
     }
 }
 

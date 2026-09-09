@@ -1,7 +1,5 @@
 //! Workspace-only vertical test: real Manager client, TCP control server,
 //! BridgeSession and compiled Core service. Pipes substitute for serial hardware.
-#[path = "../../../ms-manager/src-tauri/src/services/bridge_ctl.rs"]
-mod bridge_ctl;
 #[path = "../../../ms-manager/src-tauri/src/services/controller_fs.rs"]
 mod controller_fs;
 #[path = "../../../ms-manager/src-tauri/src/services/controller_fs_unified.rs"]

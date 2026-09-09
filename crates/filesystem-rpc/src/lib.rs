@@ -1,8 +1,8 @@
 //! Borrowed, bounded filesystem wire contract. No transport or operation state.
 pub const REQUEST: u8 = 0xfc;
 pub const RESPONSE: u8 = 0xfd;
-pub const VERSION: u8 = 5;
-pub const HEADER: usize = 32;
+pub const VERSION: u8 = 6;
+pub const HEADER: usize = 40;
 pub const MAX_BODY: usize = 32_512;
 pub const MAX_DEADLINE_MS: u32 = 10_000;
 
@@ -86,6 +86,7 @@ pub enum Error {
     CancelTooLate,
     StorageFailure,
     TooLarge,
+    LifetimeChanged,
 }
 impl Error {
     pub fn decode(value: u16) -> Option<Self> {
@@ -111,6 +112,7 @@ impl Error {
             18 => Self::CancelTooLate,
             19 => Self::StorageFailure,
             20 => Self::TooLarge,
+            21 => Self::LifetimeChanged,
             _ => return None,
         })
     }
@@ -151,6 +153,7 @@ pub struct Frame<'a> {
     pub body: &'a [u8],
     /// A repeated mutation returned a retained result, rather than a fresh admission.
     pub replayed: bool,
+    pub lifetime: u64,
 }
 
 impl Frame<'_> {
@@ -264,6 +267,7 @@ pub fn decode(data: &[u8]) -> Option<Frame<'_>> {
         delay_ms: u32_at(16),
         body: &data[HEADER..],
         replayed: data[3] & 0x80 != 0,
+        lifetime: u64::from_le_bytes(data[32..40].try_into().ok()?),
     };
     frame.valid().then_some(frame)
 }
@@ -284,6 +288,7 @@ pub fn encode(frame: Frame<'_>, out: &mut [u8]) -> Option<usize> {
     out[4..6].copy_from_slice(&(frame.error as u16).to_le_bytes());
     out[6..8].fill(0);
     out[24..32].copy_from_slice(&frame.request_id.to_le_bytes());
+    out[32..40].copy_from_slice(&frame.lifetime.to_le_bytes());
     for (offset, value) in [
         (8, frame.nonce),
         (12, frame.operation_id),

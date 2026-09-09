@@ -58,6 +58,7 @@ pub enum ControllerRpcError {
     Timeout,
     SendFailed,
     InvalidRequest,
+    IncompatibleProtocol,
 }
 
 pub fn protocol_frame_request_id(payload: &[u8]) -> Option<u64> {
@@ -88,6 +89,7 @@ impl std::fmt::Display for ControllerRpcError {
             Self::Timeout => write!(f, "controller rpc timeout"),
             Self::SendFailed => write!(f, "controller rpc send failed"),
             Self::InvalidRequest => write!(f, "invalid controller rpc request"),
+            Self::IncompatibleProtocol => write!(f, "incompatible controller filesystem protocol"),
         }
     }
 }
@@ -115,6 +117,7 @@ mod tests {
             delay_ms: 10000,
             body: &[],
             replayed: false,
+            lifetime: 0,
         };
         filesystem_rpc::encode(frame, &mut bytes).unwrap();
         assert_eq!(super::protocol_frame_request_id(&bytes), Some(0xab42));

@@ -1,4 +1,4 @@
-# Filesystem wire contract v5 — shared serial correlation
+# Filesystem wire contract v6 — endpoint lifetime
 
 This unpublished, dependency-free crate owns only the borrowed wire envelope.
 Core implements the same contract in `UnifiedFileSystemRpc.{hpp,cpp}`. It does
@@ -10,22 +10,23 @@ Firmware qualification and coordinated delivery remain pending.
 
 ## Envelope
 
-All integers are little-endian. A frame is exactly 32 bytes plus its body; no
+All integers are little-endian. A frame is exactly 40 bytes plus its body; no
 padding or trailing bytes are accepted. Maximum body length is 32,512 bytes.
 
 | Offset | Type | Meaning |
 | --- | --- | --- |
 | 0 | u8 | `0xfc` request, `0xfd` response |
-| 1 | u8 | Version, exactly `5` |
+| 1 | u8 | Version, exactly `6` |
 | 2 | u8 | Operation, 0 through 14 |
 | 3 | u8 | State in bits 0–6; bit 7 marks a retained mutation replay |
-| 4 | u16 | Typed error, 0 through 20 |
+| 4 | u16 | Typed error, 0 through 21 |
 | 6 | u16 | Reserved, exactly zero |
 | 8 | u32 | Client mutation nonce |
 | 12 | u32 | Core operation ID |
 | 16 | u32 | Requested deadline or pending-response retry interval, milliseconds |
 | 20 | u32 | Exact body length |
 | 24 | u64 | Nonzero transport exchange ID, echoed in the response |
+| 32 | u64 | Core endpoint lifetime; zero on capability discovery |
 
 States are Request=0, Complete=1, Pending=2, Failed=3, Cancelled=4.
 Unknown values and inconsistent direction/state combinations are rejected.
@@ -97,9 +98,9 @@ offset overflow and every exact response length, and returns buffers in request
 order. The caller must stream successive batches and handle file changes; this
 API does not promise a multi-request read snapshot or a firmware throughput gain.
 
-Version 5 rejects all previous prototypes. Version 3 introduced Core-assigned
+Version 6 rejects all previous prototypes. Version 3 introduced Core-assigned
 upload identities; version 4 added bounded conditional failure details.
-Version 5 widens exchange correlation and reserves two zero bytes. Negotiate
+Version 5 widens exchange correlation; version 6 binds requests to the Core endpoint lifetime. Negotiate
 capabilities before mutation; do not silently downgrade.
 
 The Bridge assigns a process-wide, non-wrapping 64-bit exchange sequence across
@@ -111,8 +112,24 @@ caller's original exchange ID on the matched response and also checks operation,
 mutation nonce and any known Core operation ID. Expiration is checked before
 matching, and orphaned filesystem responses never reach the host musical path.
 Client IDs therefore need not be globally unique. The pending bound stays eight.
-This transport mechanism does not itself protect upload tickets across a Core
-reboot; boot-lifetime qualification is a separate, still-open requirement.
+Core generates a fresh nonzero 64-bit lifetime for each endpoint construction.
+Capabilities requests use lifetime zero and their successful response supplies
+the current lifetime in the envelope. Subsequent requests echo that value;
+Core rejects a mismatch with LifetimeChanged=21 before storage admission or
+retained-result lookup. Its refusal echoes the original request lifetime.
+Missing platform entropy returns StorageUnavailable even for capability discovery.
+The service receives its immutable lifetime explicitly; tests inject known values.
+
+Manager pins the discovered lifetime for the entire client object, including TCP
+reconnects, mutation retry, Poll and best-effort Abort. Explicit renegotiation may
+confirm this value but cannot replace it silently. A changed lifetime during a
+retained mutation or query is ambiguous: reconcile the durable state using a new
+client, rather than resubmitting an old ticket under a new epoch. Fresh clients
+automatically discover capabilities before their first storage request. This adds
+one exchange to a fresh read-only client; upload already negotiated capabilities.
+Random lifetime uniqueness is probabilistic (64 bits), not a durable boot counter
+or an authentication mechanism. Hardware entropy and firmware timing still require
+on-device qualification.
 The upload identity is the coordinator's nonzero, non-wrapping job ID. It is
 also the commit's operation ID and cannot address a later upload during that
 coordinator's lifetime, including after result reclamation. A second nonce

@@ -94,6 +94,7 @@ struct FilesystemCorrelation {
     operation: filesystem_rpc::Operation,
     nonce: u32,
     operation_id: u32,
+    lifetime: u64,
 }
 
 impl<C: Codec> BridgeSession<C> {
@@ -207,6 +208,21 @@ impl<C: Codec> BridgeSession<C> {
                         let _ = tx.try_send(LogEntry::protocol_in(&name, payload.len()));
                     }
 
+                    if payload.first() == Some(&filesystem_rpc::RESPONSE)
+                        && payload
+                            .get(1)
+                            .is_some_and(|version| *version != filesystem_rpc::VERSION)
+                    {
+                        for index in (0..self.pending_controller_rpcs.len()).rev() {
+                            if self.pending_controller_rpcs[index].filesystem.is_some() {
+                                let pending = self.pending_controller_rpcs.remove(index).unwrap();
+                                let _ = pending
+                                    .response_tx
+                                    .send(Err(ControllerRpcError::IncompatibleProtocol));
+                            }
+                        }
+                        continue;
+                    }
                     if self.complete_pending_controller_rpc(&mut payload) {
                         continue;
                     }
@@ -295,6 +311,7 @@ impl<C: Codec> BridgeSession<C> {
                 operation: frame.operation,
                 nonce: frame.nonce,
                 operation_id: frame.operation_id,
+                lifetime: frame.lifetime,
             });
             let Some(exchange_id) = next_exchange_id() else {
                 let _ = request
@@ -405,6 +422,8 @@ impl PendingControllerRpc {
                     && Some(frame.request_id) == self.expected_request_id
                     && frame.operation == expected.operation
                     && frame.nonce == expected.nonce
+                    && (expected.operation == filesystem_rpc::Operation::Capabilities
+                        || frame.lifetime == expected.lifetime)
                     && (expected.operation_id == 0 || frame.operation_id == expected.operation_id)
             });
         }
@@ -459,6 +478,7 @@ mod tests {
                 delay_ms: 0,
                 body: &[],
                 replayed: false,
+                lifetime: 0,
             },
             &mut bytes,
         )
@@ -567,6 +587,25 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_core_fails_filesystem_waiters_explicitly_without_host_leak() {
+        let mut harness = RpcHarness::new();
+        let (_, mut first) = harness.request(1);
+        let (_, mut second) = harness.request(2);
+        harness
+            .session
+            .relay_controller_to_host(Bytes::from_static(&[0xfd, 5]));
+        assert_eq!(
+            first.try_recv(),
+            Ok(Err(ControllerRpcError::IncompatibleProtocol))
+        );
+        assert_eq!(
+            second.try_recv(),
+            Ok(Err(ControllerRpcError::IncompatibleProtocol))
+        );
+        assert!(harness.host.try_recv().is_err());
+    }
+
+    #[test]
     fn expiration_and_new_serial_session_do_not_reuse_a_previous_exchange() {
         let mut old = RpcHarness::new();
         let (a, mut expired) = old.request(42);
@@ -607,6 +646,7 @@ mod tests {
             expected_request_id: Some(99),
             filesystem: Some(FilesystemCorrelation {
                 client_id: 1,
+                lifetime: 0,
                 operation: Operation::Poll,
                 nonce: 7,
                 operation_id: 8,
@@ -614,11 +654,12 @@ mod tests {
             deadline: Instant::now() + Duration::from_secs(1),
             response_tx,
         };
-        for (op, nonce, identity, accepted) in [
-            (Operation::Poll, 7, 8, true),
-            (Operation::Cancel, 7, 8, false),
-            (Operation::Poll, 6, 8, false),
-            (Operation::Poll, 7, 9, false),
+        for (op, nonce, identity, lifetime, accepted) in [
+            (Operation::Poll, 7, 8, 0, true),
+            (Operation::Cancel, 7, 8, 0, false),
+            (Operation::Poll, 6, 8, 0, false),
+            (Operation::Poll, 7, 9, 0, false),
+            (Operation::Poll, 7, 8, 42, false),
         ] {
             let mut bytes = vec![0; filesystem_rpc::HEADER];
             filesystem_rpc::encode(
@@ -632,6 +673,7 @@ mod tests {
                     delay_ms: 0,
                     body: &[],
                     replayed: false,
+                    lifetime,
                 },
                 &mut bytes,
             )
