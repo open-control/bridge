@@ -19,42 +19,20 @@ pub struct ControllerRpcRequest {
 
 pub type ControllerRpcResult = std::result::Result<Bytes, ControllerRpcError>;
 
-const FILESYSTEM_ERROR_RESPONSE_ID: u8 = 0xEF;
-
-fn is_filesystem_success_response_id(message_id: u8) -> bool {
-    matches!(
-        message_id,
-        0xE1 | 0xE3 | 0xE5 | 0xE7 | 0xE9 | 0xEB | 0xED | 0xF1 | 0xF3 | 0xF5 | 0xF7 | 0xF9 | 0xFB
-    )
-}
-
-/// Match the requested terminal response while preserving the filesystem
-/// protocol's generic, request-correlated error response. Without this
-/// alternate terminal id, a controller-side BUSY or STORAGE_ERROR is received
-/// on the serial link but the local caller waits until a false RPC timeout.
-pub(super) fn protocol_response_id_matches(expected: Option<u8>, actual: Option<u8>) -> bool {
-    match expected {
-        None => true,
-        Some(expected) => {
-            actual == Some(expected)
-                || (actual == Some(FILESYSTEM_ERROR_RESPONSE_ID)
-                    && is_filesystem_success_response_id(expected))
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerRpcError {
     Busy,
     Disconnected,
     Timeout,
     SendFailed,
+    InvalidRequest,
 }
 
 pub fn protocol_frame_request_id(payload: &[u8]) -> Option<u16> {
-    if matches!(payload.first(), Some(&filesystem_rpc::REQUEST) | Some(&filesystem_rpc::RESPONSE))
-        && payload.get(1) == Some(&filesystem_rpc::VERSION)
-    {
+    if matches!(
+        payload.first(),
+        Some(&filesystem_rpc::REQUEST) | Some(&filesystem_rpc::RESPONSE)
+    ) {
         return filesystem_rpc::decode(payload).map(|frame| frame.request_id);
     }
     if payload.len() < 5 {
@@ -80,6 +58,7 @@ impl std::fmt::Display for ControllerRpcError {
             Self::Disconnected => write!(f, "controller rpc disconnected"),
             Self::Timeout => write!(f, "controller rpc timeout"),
             Self::SendFailed => write!(f, "controller rpc send failed"),
+            Self::InvalidRequest => write!(f, "invalid controller rpc request"),
         }
     }
 }
@@ -88,23 +67,41 @@ impl std::fmt::Display for ControllerRpcError {
 mod tests {
     #[test]
     fn unified_correlation_validates_whole_frame_without_named_fallback() {
-        use filesystem_rpc::{Frame, Operation, State, Error};
+        use filesystem_rpc::{Error, Frame, Operation, State};
         let mut bytes = [0; filesystem_rpc::HEADER];
-        let frame = Frame { operation: Operation::UploadCommit, state: State::Request,
-            request_id: 0xab42, error: Error::None, nonce: 9, operation_id: 0,
-            delay_ms: 10000, body: &[], replayed: false };
+        let frame = Frame {
+            operation: Operation::UploadCommit,
+            state: State::Request,
+            request_id: 0xab42,
+            error: Error::None,
+            nonce: 9,
+            operation_id: 0,
+            delay_ms: 10000,
+            body: &[],
+            replayed: false,
+        };
         filesystem_rpc::encode(frame, &mut bytes).unwrap();
         assert_eq!(super::protocol_frame_request_id(&bytes), Some(0xab42));
-        for size in 0..bytes.len() { assert_eq!(super::protocol_frame_request_id(&bytes[..size]), None); }
+        for size in 0..bytes.len() {
+            assert_eq!(super::protocol_frame_request_id(&bytes[..size]), None);
+        }
+        for version in 0..=u8::MAX {
+            if version == filesystem_rpc::VERSION {
+                continue;
+            }
+            bytes[1] = version;
+            assert_eq!(super::protocol_frame_request_id(&bytes), None);
+        }
+        bytes[1] = filesystem_rpc::VERSION;
         bytes[20] = 1;
         assert_eq!(super::protocol_frame_request_id(&bytes), None);
     }
-    use super::{protocol_frame_request_id, protocol_response_id_matches};
+    use super::protocol_frame_request_id;
 
     #[test]
     fn protocol_frame_request_id_reads_named_frame_layout() {
         assert_eq!(
-            protocol_frame_request_id(&[0xE8, 0x02, b'f', b's', 0x01, 0x34, 0x12]),
+            protocol_frame_request_id(&[0xD0, 0x02, b'f', b's', 0x01, 0x34, 0x12]),
             Some(0x1234)
         );
     }
@@ -112,7 +109,7 @@ mod tests {
     #[test]
     fn protocol_frame_request_id_reads_empty_name_layout() {
         assert_eq!(
-            protocol_frame_request_id(&[0xE8, 0x00, 0x01, 0x78, 0x56]),
+            protocol_frame_request_id(&[0xD0, 0x00, 0x01, 0x78, 0x56]),
             Some(0x5678)
         );
     }
@@ -120,27 +117,10 @@ mod tests {
     #[test]
     fn protocol_frame_request_id_rejects_truncated_frames() {
         assert_eq!(protocol_frame_request_id(&[]), None);
-        assert_eq!(protocol_frame_request_id(&[0xE8, 0x02, b'f']), None);
+        assert_eq!(protocol_frame_request_id(&[0xD0, 0x02, b'f']), None);
         assert_eq!(
-            protocol_frame_request_id(&[0xE8, 0x02, b'f', b's', 0x01, 0x34]),
+            protocol_frame_request_id(&[0xD0, 0x02, b'f', b's', 0x01, 0x34]),
             None
         );
-    }
-
-    #[test]
-    fn filesystem_error_is_an_alternate_terminal_response() {
-        for expected in [
-            0xE1, 0xE3, 0xE5, 0xE7, 0xE9, 0xEB, 0xED, 0xF1, 0xF3, 0xF5, 0xF7, 0xF9, 0xFB,
-        ] {
-            assert!(protocol_response_id_matches(Some(expected), Some(0xEF)));
-        }
-        assert!(protocol_response_id_matches(Some(0xF7), Some(0xF7)));
-    }
-
-    #[test]
-    fn filesystem_error_does_not_capture_other_protocol_waiters() {
-        assert!(!protocol_response_id_matches(Some(0xFD), Some(0xEF)));
-        assert!(!protocol_response_id_matches(Some(0xE1), Some(0xE3)));
-        assert!(protocol_response_id_matches(None, Some(0xEF)));
     }
 }

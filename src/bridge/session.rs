@@ -10,12 +10,8 @@
 //! - Transport lifecycle (that's the caller's responsibility)
 //! - Reconnection logic (handled by the bridge main loop)
 
-use super::controller_rpc::{
-    protocol_frame_request_id, protocol_response_id_matches, ControllerRpcError,
-    ControllerRpcRequest,
-};
+use super::controller_rpc::{protocol_frame_request_id, ControllerRpcError, ControllerRpcRequest};
 use super::guard::{GuardAction, RelayGuard};
-use super::persistence_job_protocol::is_reserved_job_response;
 
 #[cfg(all(test, feature = "unified-rpc-e2e"))]
 #[path = "../../test-support/unified_transfer.rs"]
@@ -204,10 +200,10 @@ impl<C: Codec> BridgeSession<C> {
                         continue;
                     }
 
-                    // A job response can outlive its local waiter. Unlike an
+                    // A filesystem response can outlive its local waiter. Unlike an
                     // ordinary controller message, it is point-to-point RPC
                     // state and must never leak onto the Bitwig host path.
-                    if is_reserved_job_response(&payload) {
+                    if payload.first() == Some(&filesystem_rpc::RESPONSE) {
                         continue;
                     }
 
@@ -260,6 +256,22 @@ impl<C: Codec> BridgeSession<C> {
     }
 
     fn handle_controller_rpc_request(&mut self, request: ControllerRpcRequest) {
+        if matches!(
+            request.payload.first(),
+            Some(&filesystem_rpc::REQUEST) | Some(&filesystem_rpc::RESPONSE)
+        ) {
+            let valid = filesystem_rpc::decode(&request.payload).is_some_and(|frame| {
+                frame.state == filesystem_rpc::State::Request
+                    && request.expected_response_id == Some(filesystem_rpc::RESPONSE)
+                    && request.expected_request_id == Some(frame.request_id)
+            });
+            if !valid {
+                let _ = request
+                    .response_tx
+                    .send(Err(ControllerRpcError::InvalidRequest));
+                return;
+            }
+        }
         self.expire_pending_controller_rpc();
         if self.pending_controller_rpcs.len() >= MAX_PENDING_CONTROLLER_RPCS {
             let _ = request.response_tx.send(Err(ControllerRpcError::Busy));
@@ -347,7 +359,14 @@ impl<C: Codec> BridgeSession<C> {
 impl PendingControllerRpc {
     fn matches_payload(&self, payload: &Bytes) -> bool {
         let first_byte = payload.first().copied();
-        if !protocol_response_id_matches(self.expected_response_id, first_byte) {
+        // Reserved filesystem frames require an explicit, valid waiter. A
+        // wildcard for another RPC family must not consume malformed/late data.
+        if first_byte == Some(filesystem_rpc::RESPONSE)
+            && (self.expected_response_id != first_byte || self.expected_request_id.is_none())
+        {
+            return false;
+        }
+        if self.expected_response_id.is_some() && self.expected_response_id != first_byte {
             return false;
         }
 
@@ -371,6 +390,87 @@ mod tests {
     use crate::codec::RawCodec;
     use std::time::Duration;
     use tokio::sync::oneshot;
+
+    fn filesystem_frame(request_id: u16, response: bool) -> Bytes {
+        use filesystem_rpc::{Error, Frame, Operation, State};
+        let mut bytes = vec![0; filesystem_rpc::HEADER];
+        filesystem_rpc::encode(
+            Frame {
+                operation: Operation::Capabilities,
+                state: if response {
+                    State::Complete
+                } else {
+                    State::Request
+                },
+                request_id,
+                error: Error::None,
+                nonce: 0,
+                operation_id: 0,
+                delay_ms: 0,
+                body: &[],
+                replayed: false,
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        Bytes::from(bytes)
+    }
+
+    #[test]
+    fn filesystem_response_cannot_capture_a_wildcard_waiter() {
+        let (response_tx, _) = oneshot::channel();
+        let pending = PendingControllerRpc {
+            expected_response_id: None,
+            expected_request_id: None,
+            deadline: Instant::now() + Duration::from_secs(1),
+            response_tx,
+        };
+        assert!(!pending.matches_payload(&filesystem_frame(42, true)));
+        assert!(!pending.matches_payload(&Bytes::from_static(&[0xFD])));
+    }
+
+    #[test]
+    fn invalid_filesystem_requests_never_reach_the_controller() {
+        let (_, ctrl_in_rx) = mpsc::channel(16);
+        let (ctrl_out_tx, mut ctrl_out_rx) = mpsc::channel(16);
+        let (_, host_in_rx) = mpsc::channel(16);
+        let (host_out_tx, _) = mpsc::channel(16);
+        let mut session = BridgeSession::new(
+            TransportChannels {
+                rx: ctrl_in_rx,
+                tx: ctrl_out_tx,
+            },
+            TransportChannels {
+                rx: host_in_rx,
+                tx: host_out_tx,
+            },
+            RawCodec,
+            Arc::new(Stats::new()),
+            None,
+        );
+        for (payload, expected_response_id, expected_request_id) in [
+            (Bytes::from_static(&[0xFC, 0]), Some(0xFD), None),
+            (filesystem_frame(42, true), Some(0xFD), Some(42)),
+            (filesystem_frame(42, false), None, Some(42)),
+            (filesystem_frame(42, false), Some(0xFD), None),
+            (filesystem_frame(42, false), Some(0xFD), Some(43)),
+        ] {
+            let (response_tx, mut response_rx) = oneshot::channel();
+            session.handle_controller_rpc_request(ControllerRpcRequest {
+                payload,
+                expected_response_id,
+                expected_request_id,
+                timeout: Duration::from_secs(1),
+                response_tx,
+            });
+            assert_eq!(
+                response_rx.try_recv(),
+                Ok(Err(ControllerRpcError::InvalidRequest))
+            );
+            assert!(ctrl_out_rx.try_recv().is_err());
+            assert!(session.pending_controller_rpcs.is_empty());
+        }
+    }
 
     #[tokio::test]
     async fn test_housekeeping_survives_continuous_controller_traffic() {
@@ -396,7 +496,7 @@ mod tests {
         session
             .pending_controller_rpcs
             .push_back(PendingControllerRpc {
-                expected_response_id: Some(0xE1),
+                expected_response_id: Some(0xD1),
                 expected_request_id: None,
                 deadline: Instant::now() + Duration::from_millis(50),
                 response_tx,
@@ -685,8 +785,8 @@ mod tests {
         let (response_tx, response_rx) = oneshot::channel();
         rpc_tx
             .send(ControllerRpcRequest {
-                payload: Bytes::from_static(&[0xE0, 0x01]),
-                expected_response_id: Some(0xE1),
+                payload: Bytes::from_static(&[0xD0, 0x01]),
+                expected_response_id: Some(0xD1),
                 expected_request_id: None,
                 timeout: Duration::from_secs(1),
                 response_tx,
@@ -695,15 +795,15 @@ mod tests {
             .unwrap();
 
         let request = ctrl_out_rx.recv().await.unwrap();
-        assert_eq!(request.as_ref(), &[0xE0, 0x01]);
+        assert_eq!(request.as_ref(), &[0xD0, 0x01]);
 
         ctrl_in_tx
-            .send(Bytes::from_static(&[0xE1, 0x00, 0x2A]))
+            .send(Bytes::from_static(&[0xD1, 0x00, 0x2A]))
             .await
             .unwrap();
 
         let response = response_rx.await.unwrap().unwrap();
-        assert_eq!(response.as_ref(), &[0xE1, 0x00, 0x2A]);
+        assert_eq!(response.as_ref(), &[0xD1, 0x00, 0x2A]);
         assert!(host_out_rx.try_recv().is_err());
 
         shutdown.store(true, Ordering::SeqCst);
@@ -711,26 +811,8 @@ mod tests {
         let _ = handle.await;
     }
 
-    #[test]
-    fn test_controller_rpc_captures_filesystem_error_by_request_id() {
-        let (response_tx, _response_rx) = oneshot::channel();
-        let pending = PendingControllerRpc {
-            expected_response_id: Some(0xF7),
-            expected_request_id: Some(0x1234),
-            deadline: Instant::now() + Duration::from_secs(1),
-            response_tx,
-        };
-
-        assert!(
-            pending.matches_payload(&Bytes::from_static(&[0xEF, 0x00, 0x01, 0x34, 0x12, 0x04,]))
-        );
-        assert!(
-            !pending.matches_payload(&Bytes::from_static(&[0xEF, 0x00, 0x01, 0x35, 0x12, 0x04,]))
-        );
-    }
-
     #[tokio::test]
-    async fn test_controller_rpc_captures_job_response_before_quarantine() {
+    async fn test_controller_rpc_captures_filesystem_response_before_quarantine() {
         let (ctrl_in_tx, ctrl_in_rx) = mpsc::channel(16);
         let (ctrl_out_tx, mut ctrl_out_rx) = mpsc::channel(16);
         let (_host_in_tx, host_in_rx) = mpsc::channel(16);
@@ -755,23 +837,23 @@ mod tests {
         let (response_tx, response_rx) = oneshot::channel();
         rpc_tx
             .send(ControllerRpcRequest {
-                payload: Bytes::from_static(&[0xFC, 0x00]),
+                payload: filesystem_frame(42, false),
                 expected_response_id: Some(0xFD),
-                expected_request_id: None,
+                expected_request_id: Some(42),
                 timeout: Duration::from_secs(1),
                 response_tx,
             })
             .await
             .unwrap();
-        assert_eq!(ctrl_out_rx.recv().await.unwrap().as_ref(), &[0xFC, 0x00]);
-
-        ctrl_in_tx
-            .send(Bytes::from_static(&[0xFD, 0x00, 0x2A]))
-            .await
-            .unwrap();
         assert_eq!(
-            response_rx.await.unwrap().unwrap().as_ref(),
-            &[0xFD, 0x00, 0x2A]
+            ctrl_out_rx.recv().await.unwrap(),
+            filesystem_frame(42, false)
+        );
+
+        ctrl_in_tx.send(filesystem_frame(42, true)).await.unwrap();
+        assert_eq!(
+            response_rx.await.unwrap().unwrap(),
+            filesystem_frame(42, true)
         );
         assert!(host_out_rx.try_recv().is_err());
 
@@ -781,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expired_job_response_is_quarantined_without_timing_sleep() {
+    fn test_expired_filesystem_response_is_quarantined_without_timing_sleep() {
         let (_ctrl_in_tx, ctrl_in_rx) = mpsc::channel(16);
         let (ctrl_out_tx, _ctrl_out_rx) = mpsc::channel(16);
         let (_host_in_tx, host_in_rx) = mpsc::channel(16);
@@ -802,7 +884,7 @@ mod tests {
             .pending_controller_rpcs
             .push_back(PendingControllerRpc {
                 expected_response_id: Some(0xFD),
-                expected_request_id: None,
+                expected_request_id: Some(42),
                 deadline: Instant::now(),
                 response_tx,
             });
@@ -810,7 +892,13 @@ mod tests {
         session.expire_pending_controller_rpc();
         assert_eq!(response_rx.try_recv(), Ok(Err(ControllerRpcError::Timeout)));
 
-        session.relay_controller_to_host(Bytes::from_static(&[0xFD, 0x00, 0x2A]));
+        for payload in [
+            filesystem_frame(42, true),
+            Bytes::from_static(&[0xFD, 0]),
+            Bytes::from_static(&[0xFD]),
+        ] {
+            session.relay_controller_to_host(payload);
+        }
         assert!(host_out_rx.try_recv().is_err());
     }
 
@@ -842,8 +930,8 @@ mod tests {
         let (second_tx, second_rx) = oneshot::channel();
         rpc_tx
             .send(ControllerRpcRequest {
-                payload: Bytes::from_static(&[0xE8, 0x01]),
-                expected_response_id: Some(0xE9),
+                payload: Bytes::from_static(&[0xD0, 0x01]),
+                expected_response_id: Some(0xD1),
                 expected_request_id: None,
                 timeout: Duration::from_secs(1),
                 response_tx: first_tx,
@@ -852,8 +940,8 @@ mod tests {
             .unwrap();
         rpc_tx
             .send(ControllerRpcRequest {
-                payload: Bytes::from_static(&[0xE8, 0x02]),
-                expected_response_id: Some(0xE9),
+                payload: Bytes::from_static(&[0xD0, 0x02]),
+                expected_response_id: Some(0xD1),
                 expected_request_id: None,
                 timeout: Duration::from_secs(1),
                 response_tx: second_tx,
@@ -861,25 +949,25 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ctrl_out_rx.recv().await.unwrap().as_ref(), &[0xE8, 0x01]);
-        assert_eq!(ctrl_out_rx.recv().await.unwrap().as_ref(), &[0xE8, 0x02]);
+        assert_eq!(ctrl_out_rx.recv().await.unwrap().as_ref(), &[0xD0, 0x01]);
+        assert_eq!(ctrl_out_rx.recv().await.unwrap().as_ref(), &[0xD0, 0x02]);
 
         ctrl_in_tx
-            .send(Bytes::from_static(&[0xE9, 0x00, 0x01]))
+            .send(Bytes::from_static(&[0xD1, 0x00, 0x01]))
             .await
             .unwrap();
         ctrl_in_tx
-            .send(Bytes::from_static(&[0xE9, 0x00, 0x02]))
+            .send(Bytes::from_static(&[0xD1, 0x00, 0x02]))
             .await
             .unwrap();
 
         assert_eq!(
             first_rx.await.unwrap().unwrap().as_ref(),
-            &[0xE9, 0x00, 0x01]
+            &[0xD1, 0x00, 0x01]
         );
         assert_eq!(
             second_rx.await.unwrap().unwrap().as_ref(),
-            &[0xE9, 0x00, 0x02]
+            &[0xD1, 0x00, 0x02]
         );
         assert!(host_out_rx.try_recv().is_err());
 
@@ -916,8 +1004,8 @@ mod tests {
         let (second_tx, second_rx) = oneshot::channel();
         rpc_tx
             .send(ControllerRpcRequest {
-                payload: Bytes::from_static(&[0xE8, 0x00, 0x01, 0x01, 0x00]),
-                expected_response_id: Some(0xE9),
+                payload: Bytes::from_static(&[0xD0, 0x00, 0x01, 0x01, 0x00]),
+                expected_response_id: Some(0xD1),
                 expected_request_id: Some(1),
                 timeout: Duration::from_secs(1),
                 response_tx: first_tx,
@@ -926,8 +1014,8 @@ mod tests {
             .unwrap();
         rpc_tx
             .send(ControllerRpcRequest {
-                payload: Bytes::from_static(&[0xE8, 0x00, 0x01, 0x02, 0x00]),
-                expected_response_id: Some(0xE9),
+                payload: Bytes::from_static(&[0xD0, 0x00, 0x01, 0x02, 0x00]),
+                expected_response_id: Some(0xD1),
                 expected_request_id: Some(2),
                 timeout: Duration::from_secs(1),
                 response_tx: second_tx,
@@ -939,21 +1027,21 @@ mod tests {
         let _ = ctrl_out_rx.recv().await.unwrap();
 
         ctrl_in_tx
-            .send(Bytes::from_static(&[0xE9, 0x00, 0x01, 0x02, 0x00]))
+            .send(Bytes::from_static(&[0xD1, 0x00, 0x01, 0x02, 0x00]))
             .await
             .unwrap();
         ctrl_in_tx
-            .send(Bytes::from_static(&[0xE9, 0x00, 0x01, 0x01, 0x00]))
+            .send(Bytes::from_static(&[0xD1, 0x00, 0x01, 0x01, 0x00]))
             .await
             .unwrap();
 
         assert_eq!(
             second_rx.await.unwrap().unwrap().as_ref(),
-            &[0xE9, 0x00, 0x01, 0x02, 0x00]
+            &[0xD1, 0x00, 0x01, 0x02, 0x00]
         );
         assert_eq!(
             first_rx.await.unwrap().unwrap().as_ref(),
-            &[0xE9, 0x00, 0x01, 0x01, 0x00]
+            &[0xD1, 0x00, 0x01, 0x01, 0x00]
         );
         assert!(host_out_rx.try_recv().is_err());
 
@@ -989,8 +1077,8 @@ mod tests {
         let (response_tx, response_rx) = oneshot::channel();
         rpc_tx
             .send(ControllerRpcRequest {
-                payload: Bytes::from_static(&[0xE0, 0x01]),
-                expected_response_id: Some(0xE1),
+                payload: Bytes::from_static(&[0xD0, 0x01]),
+                expected_response_id: Some(0xD1),
                 expected_request_id: None,
                 timeout: Duration::from_secs(1),
                 response_tx,
@@ -1007,11 +1095,11 @@ mod tests {
         assert_eq!(forwarded.as_ref(), &[0x10, 0x00]);
 
         ctrl_in_tx
-            .send(Bytes::from_static(&[0xE1, 0x00]))
+            .send(Bytes::from_static(&[0xD1, 0x00]))
             .await
             .unwrap();
         let response = response_rx.await.unwrap().unwrap();
-        assert_eq!(response.as_ref(), &[0xE1, 0x00]);
+        assert_eq!(response.as_ref(), &[0xD1, 0x00]);
 
         shutdown.store(true, Ordering::SeqCst);
         drop(ctrl_in_tx);
