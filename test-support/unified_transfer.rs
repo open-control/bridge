@@ -94,6 +94,8 @@ async fn run_transfer(lose_terminal: bool) {
     ));
     let controller_task = tokio::spawn(async move {
         let mut dropped = false;
+        let mut mutation_losses = Vec::new();
+        let mut mutation_replays = 0;
         let mut chunks = 0;
         let mut upload_ids = Vec::new();
         let mut read_pair: Option<Vec<Vec<u8>>> = None;
@@ -144,7 +146,19 @@ async fn run_transfer(lose_terminal: bool) {
                 dropped = true;
                 continue;
             }
-            replay |= decoded.replayed;
+            let named_mutation = matches!(request.operation, Operation::Mkdir | Operation::Rename)
+                || (request.operation == Operation::Delete && request.body.last() == Some(&1));
+            if named_mutation && !mutation_losses.contains(&request.operation) {
+                assert!(matches!(decoded.state, State::Complete | State::Pending));
+                mutation_losses.push(request.operation);
+                continue;
+            }
+            if named_mutation && decoded.replayed {
+                mutation_replays += 1;
+            }
+            if request.operation == Operation::UploadCommit {
+                replay |= decoded.replayed;
+            }
             if request.operation == Operation::Read {
                 if let Some(pair) = read_pair.as_mut() {
                     pair.push(response);
@@ -172,8 +186,10 @@ async fn run_transfer(lose_terminal: bool) {
         }
         assert!(dropped);
         assert_eq!(replay, !lose_terminal);
-        assert_eq!(chunks, 18);
-        assert_eq!(upload_ids.len(), 14);
+        assert_eq!(chunks, 19);
+        assert_eq!(upload_ids.len(), 16);
+        assert_eq!(mutation_losses.len(), 3);
+        assert_eq!(mutation_replays, 3);
         assert_eq!(reordered, 1);
         assert_eq!(pages, 2);
         input.shutdown().await.unwrap();
@@ -302,6 +318,50 @@ async fn run_transfer(lose_terminal: bool) {
         client.read_batch("projects/unified.bin", 245_760, 6).await,
         Err(controller_fs_unified::Failure::Protocol)
     ));
+    client
+        .mkdir("projects/mutations", 0x30000001)
+        .await
+        .unwrap();
+    client
+        .mkdir("projects/mutations/child", 0x30000002)
+        .await
+        .unwrap();
+    client
+        .rename(
+            "projects/mutations/child",
+            "projects/mutations/renamed",
+            0x30000003,
+        )
+        .await
+        .unwrap();
+    client
+        .upload("projects/mutations/renamed/file", b"delete-me", 0x30000004)
+        .await
+        .unwrap();
+    client
+        .delete("projects/mutations/renamed/file", false, 0x30000005)
+        .await
+        .unwrap();
+    assert!(matches!(
+        client.read("projects/mutations/renamed/file", 0, 1).await,
+        Err(controller_fs_unified::Failure::Remote(
+            filesystem_rpc::Error::NotFound
+        ))
+    ));
+    client
+        .upload("projects/mutations/renamed/file", &[], 0x30000006)
+        .await
+        .unwrap();
+    client
+        .delete("projects/mutations", true, 0x30000007)
+        .await
+        .unwrap();
+    assert!(matches!(
+        client.read("projects/mutations/renamed/file", 0, 1).await,
+        Err(controller_fs_unified::Failure::Remote(
+            filesystem_rpc::Error::NotFound
+        ))
+    ));
     // FIFO barrier: both duplicated read replies have crossed the relay before checking the host.
     client.capabilities().await.unwrap();
     assert!(
@@ -320,7 +380,7 @@ async fn run_transfer(lose_terminal: bool) {
     server_task.await.unwrap().unwrap();
     assert!(child.wait().await.unwrap().success());
     eprintln!(
-        "E2E: 13 uploads (2 x 245765 bytes) + 1 rejected nonce with cleanup, {} chunks, lost {}={}, retained replay={}, 12 entries/2 pages, 8 reversed pipelined replies, short-read rejection, exact readback, no host leak",
+        "E2E: 15 uploads (2 x 245765 bytes) + 1 rejected nonce, {} chunks, lost {}={}, retained replay={}, 12 entries/2 pages, 8 reversed reads, mkdir/rename/delete with 3 lost replies and replays, no host leak",
         counts.2,
         if lose_terminal {
             "terminal"

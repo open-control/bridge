@@ -1,4 +1,4 @@
-# Filesystem wire contract v3 — R3b read and listing slice
+# Filesystem wire contract v3 — R3c directory mutations
 
 This unpublished, dependency-free crate owns only the borrowed wire envelope.
 Core implements the same contract in `UnifiedFileSystemRpc.{hpp,cpp}`. It does
@@ -60,15 +60,15 @@ exactly; successful responses are empty unless specified otherwise.
 | 5 | UploadChunk | u32 upload identity, u32 offset, u16 count, raw bytes | u32 accumulated size |
 | 6 | UploadCommit | u32 upload identity | Empty, after cooperative commit |
 | 7 | UploadAbort | u32 upload identity | Empty |
-| 8 | Mkdir | Reserved | Unsupported |
-| 9 | Delete | Reserved | Unsupported |
-| 10 | Rename | Reserved | Unsupported |
+| 8 | Mkdir | Path | Empty, retained |
+| 9 | Delete | Path, u8 recursive (0/1) | Empty, retained |
+| 10 | Rename | Source path, destination path | Empty, retained |
 | 11 | ConditionalReplace | Reserved | Unsupported |
 | 12 | ConditionalDelete | Reserved | Unsupported |
 | 13 | Poll | Empty | Retained operation result |
 | 14 | Cancel | Empty | Cancelled, existing terminal result, or typed refusal |
 
-IDs 6 and 8–12 are retained mutations. R3b advertises mask `0x60ff`, a
+IDs 6 and 8–12 are retained mutations. R3c advertises mask `0x67ff`, a
 30,720-byte chunk limit, 524,288-byte upload limit and 30,000-ms result window.
 One upload may be staged. A fixed registry retains **32 operation results**.
 A terminal record expires at 30,000 ms; a pending operation is never reaped by
@@ -102,6 +102,23 @@ The upload identity is the coordinator's nonzero, non-wrapping job ID. It is
 also the commit's operation ID and cannot address a later upload during that
 coordinator's lifetime, including after result reclamation. A second nonce
 cannot replace an already pending commit.
+
+Mkdir, Rename and nonrecursive Delete execute under a mutation lease and retain
+their result in the same registry as commits. A recursive Delete uses the existing
+hide-first, bounded tree-cleanup continuation. Cancel and deadline may stop it
+before the canonical tree is hidden; afterward CancelTooLate is returned and
+cleanup continues. A cleanup failure leaves the recovery marker and blocks new
+mutations until the existing recovery plan completes. Upload and tree continuations
+share one variant storage area and cannot be active together.
+
+Retained requests compare operation kind, deadline and a SHA-256 fingerprint of
+the complete request body (bounded to 386 bytes for the implemented mutations).
+This uses collision-resistant equality, not a short checksum. Different parameters
+or an operation-kind collision under the same nonce return Conflict. The registry
+does not preserve nonce tombstones beyond the retention window: clients must not
+blindly resubmit a path mutation after expiry or reboot and must reconcile an
+ambiguous outcome. Upload identities additionally prevent a stale upload request
+from addressing a later session during the coordinator lifetime.
 
 Chunks must be sequential. A duplicate or incorrect offset is rejected without
 appending. The Manager does not automatically replay chunks; after a staging
