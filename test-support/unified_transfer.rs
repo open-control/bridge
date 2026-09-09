@@ -1,9 +1,14 @@
 //! Workspace-only vertical test: real Manager client, TCP control server,
 //! BridgeSession and compiled Core service. Pipes substitute for serial hardware.
+// These modules are formatted by their owning repository; a standalone Bridge
+// checkout must not require the optional cross-repository test dependencies.
+#[rustfmt::skip]
 #[path = "../../../ms-manager/src-tauri/src/services/controller_fs.rs"]
 mod controller_fs;
+#[rustfmt::skip]
 #[path = "../../../ms-manager/src-tauri/src/services/controller_fs_unified.rs"]
 mod controller_fs_unified;
+#[rustfmt::skip]
 #[path = "../../../ms-manager/src-tauri/src/services/controller_transport.rs"]
 mod controller_transport;
 
